@@ -1,4 +1,4 @@
-"""CLI entry point for agent-relay."""
+"""CLI entry point for ai-relay."""
 
 import logging
 import click
@@ -12,7 +12,7 @@ from .relay import RelayServer
               type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False))
 def main(host: str, port: int, log_level: str) -> None:
     """
-    agent-relay — WebSocket relay for AI coding agent CLIs.
+    ai-relay — WebSocket relay for AI coding agent CLIs.
 
     Start the relay server, then connect from OhWise Lab (or any WebSocket
     client) and send a handshake JSON to start a session:
