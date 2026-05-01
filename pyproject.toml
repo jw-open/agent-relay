@@ -3,13 +3,13 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-relay"
+name = "coding-agent-relay"
 version = "0.1.0"
 description = "WebSocket relay that bridges AI coding agent CLIs (Claude Code, Codex, Gemini CLI, Snowflake Cortex) to any web interface — stream reasoning, tool calls, and file changes in real time."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "OhWise", email = "hello@ohwise.ai" }]
-keywords = ["claude-code", "codex", "gemini", "ai-agent", "websocket", "relay", "coding-agent"]
+keywords = ["claude-code", "codex", "gemini", "ai-agent", "websocket", "relay", "coding-agent", "coding-agent-relay"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
