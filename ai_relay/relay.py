@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 import uuid
 from typing import Optional
 
@@ -15,6 +14,7 @@ from websockets.server import WebSocketServerProtocol
 
 from .adapters import get_adapter, BaseAdapter
 from .events import EventType, RelayEvent
+from .pty_session import PtySession, clean_pty_output
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class RelaySession:
         self.model = model
         self.extra_args = extra_args or []
         self._adapter: type[BaseAdapter] = get_adapter(tool)
-        self._process: Optional[asyncio.subprocess.Process] = None
+        self._pty: Optional[PtySession] = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -56,14 +56,17 @@ class RelaySession:
         ))
 
         try:
-            self._process = await asyncio.create_subprocess_exec(
-                *cmd,
+            env = os.environ.copy()
+            env.setdefault("TERM", "xterm-256color")
+            self._pty = PtySession(
+                cmd=cmd,
                 cwd=self.folder,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                session_id=self.session_id,
+                auto_confirm_delay=0,
             )
-        except FileNotFoundError as exc:
+            await self._pty.start()
+        except FileNotFoundError:
             await self._send(ws, RelayEvent(
                 type=EventType.ERROR,
                 session_id=self.session_id,
@@ -71,15 +74,11 @@ class RelaySession:
             ))
             return
 
-        # Run stream readers and WS input pump concurrently.
-        # Cancel WS pump once both output streams are exhausted (process done).
+        # Run the PTY reader and WS input pump concurrently.
+        # PTYs combine stdout/stderr and often emit screen redraw chunks without newlines.
         ws_task = asyncio.create_task(self._read_ws(ws))
         try:
-            await asyncio.gather(
-                self._read_stream(ws, self._process.stdout, "stdout"),
-                self._read_stream(ws, self._process.stderr, "stderr"),
-                return_exceptions=True,
-            )
+            await self._read_pty(ws)
         finally:
             ws_task.cancel()
             try:
@@ -87,33 +86,34 @@ class RelaySession:
             except asyncio.CancelledError:
                 pass
 
-        exit_code = await self._process.wait()
+        if self._pty and self._pty._process:
+            exit_code = await self._pty._process.wait()
+        else:
+            exit_code = None
         await self._send(ws, RelayEvent(
             type=EventType.SESSION_END,
             session_id=self.session_id,
             exit_code=exit_code,
         ))
-        logger.info("[%s] Process exited with code %d", self.session_id, exit_code)
+        logger.info("[%s] Process exited with code %s", self.session_id, exit_code)
 
     async def stop(self) -> None:
-        if self._process and self._process.returncode is None:
-            self._process.terminate()
-            try:
-                await asyncio.wait_for(self._process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                self._process.kill()
+        if self._pty:
+            await self._pty.stop()
 
     # ── I/O pumps ─────────────────────────────────────────────────────────────
 
-    async def _read_stream(
-        self, ws: WebSocketServerProtocol, stream: asyncio.StreamReader, name: str
-    ) -> None:
+    async def _read_pty(self, ws: WebSocketServerProtocol) -> None:
         while True:
-            line = await stream.readline()
-            if not line:
+            if not self._pty:
                 break
-            decoded = self._adapter.postprocess_line(line.decode("utf-8", errors="replace"))
-            event = RelayEvent.from_raw(self.session_id, name, decoded)
+            chunk = await self._pty.read()
+            if not chunk:
+                break
+            decoded = self._adapter.postprocess_line(clean_pty_output(chunk))
+            if not decoded:
+                continue
+            event = RelayEvent.from_raw(self.session_id, "stdout", decoded)
             await self._send(ws, event)
 
     async def _read_ws(self, ws: WebSocketServerProtocol) -> None:
@@ -129,9 +129,8 @@ class RelaySession:
                 continue
 
             processed = self._adapter.preprocess_input(text)
-            if self._process and self._process.stdin:
-                self._process.stdin.write(processed.encode())
-                await self._process.stdin.drain()
+            if self._pty:
+                await self._pty.write(processed.encode())
                 await self._send(ws, RelayEvent(
                     type=EventType.INPUT_ACK,
                     session_id=self.session_id,

@@ -14,9 +14,11 @@ Privilege dropping:
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import os
 import pty
 import re
+import termios
 import time
 from typing import Optional, Callable, Awaitable
 
@@ -98,9 +100,10 @@ class PtySession:
         """Open PTY and spawn subprocess."""
         self._loop = asyncio.get_running_loop()
         master_fd, slave_fd = pty.openpty()
+        os.set_blocking(master_fd, False)
         self._master_fd = master_fd
 
-        preexec = self._make_preexec()
+        preexec = self._make_preexec(slave_fd)
 
         self._process = await asyncio.create_subprocess_exec(
             *self.cmd,
@@ -119,18 +122,27 @@ class PtySession:
 
     async def read(self) -> Optional[bytes]:
         """Read one chunk from the PTY master. Returns None on EOF."""
-        assert self._loop and self._master_fd is not None
-        try:
-            return await self._loop.run_in_executor(
-                None, os.read, self._master_fd, 4096
-            )
-        except OSError:
-            return None
+        assert self._master_fd is not None
+        while True:
+            try:
+                return os.read(self._master_fd, 4096)
+            except BlockingIOError:
+                if self._process and self._process.returncode is not None:
+                    return None
+                await asyncio.sleep(0.02)
+            except OSError:
+                return None
 
     async def write(self, data: bytes) -> None:
         """Write bytes to the PTY master (subprocess stdin)."""
-        assert self._loop and self._master_fd is not None
-        await self._loop.run_in_executor(None, os.write, self._master_fd, data)
+        assert self._master_fd is not None
+        view = memoryview(data)
+        while view:
+            try:
+                written = os.write(self._master_fd, view)
+                view = view[written:]
+            except BlockingIOError:
+                await asyncio.sleep(0.02)
 
     async def stop(self) -> None:
         """Terminate the subprocess and close the PTY master fd."""
@@ -156,17 +168,21 @@ class PtySession:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _make_preexec(self):
+    def _make_preexec(self, slave_fd: int):
         uid, gid = self.uid, self.gid
 
         def _drop_privs():
+            os.setsid()
+            try:
+                fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+            except OSError:
+                pass
             if gid is not None:
                 os.setgid(gid)
             if uid is not None:
                 os.setuid(uid)
-            os.setsid()
 
-        return _drop_privs if (uid is not None or gid is not None) else None
+        return _drop_privs
 
     async def _auto_confirm(self) -> None:
         await asyncio.sleep(self.auto_confirm_delay)
