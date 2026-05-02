@@ -24,8 +24,16 @@ class BaseAdapter(ABC):
 
     @classmethod
     def preprocess_input(cls, text: str) -> str:
-        """Transform user input before writing to process stdin."""
-        return text if text.endswith("\n") else text + "\n"
+        """Transform user input before writing to process stdin.
+
+        TUI apps (Claude Code, Codex, Gemini CLI) run in raw terminal mode where
+        pressing Enter sends CR (\\r), not LF (\\n).  The PTY line discipline converts
+        \\r → \\n in cooked mode, but TUIs disable that (icrnl=off).  Send \\r so the
+        app sees the actual Enter keypress and submits the prompt.
+        """
+        # Strip any trailing newline/carriage-return and send a bare CR
+        text = text.rstrip("\r\n")
+        return text + "\r"
 
     @classmethod
     def postprocess_line(cls, line: str) -> str:
