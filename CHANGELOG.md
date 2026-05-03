@@ -4,6 +4,15 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.7] — 2026-05-03
+
+### Fixed
+- Claude Code desktop OAuth credentials can now take precedence over environment
+  API-key credentials when `AI_RELAY_CLAUDE_PREFER_OAUTH=1`, matching Lab's
+  per-user isolated auth model.
+
+---
+
 ## [0.4.6] — 2026-05-03
 
 ### Fixed

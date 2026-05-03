@@ -54,6 +54,19 @@ def _write_credentials(path: str, data: dict) -> None:
     os.replace(tmp, path)  # atomic write
 
 
+def _env_truthy(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _prefer_oauth(env: dict[str, str], oauth: dict) -> None:
+    if not oauth.get("accessToken") or not _env_truthy(env.get("AI_RELAY_CLAUDE_PREFER_OAUTH")):
+        return
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        if key in env:
+            env.pop(key, None)
+            logger.info("Removed %s from Claude subprocess env to prefer OAuth credentials", key)
+
+
 def _needs_refresh(creds: dict) -> bool:
     oauth = creds.get("claudeAiOauth", {})
     expires_at = oauth.get("expiresAt", 0)
@@ -101,6 +114,7 @@ def ensure_claude_token(env: dict[str, str]) -> None:
         return
 
     oauth = creds.get("claudeAiOauth", {})
+    _prefer_oauth(env, oauth)
     refresh_token = oauth.get("refreshToken")
     if not refresh_token:
         logger.debug("No refreshToken in credentials — skipping token refresh")
