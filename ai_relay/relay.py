@@ -16,7 +16,17 @@ from websockets.server import WebSocketServerProtocol
 
 from .adapters import get_adapter, BaseAdapter
 from .adapters.base import AgentRuntime
+from .adapters.claude_code import ClaudeStructuredRuntime
+from .adapters.gemini import GeminiStructuredRuntime
 from .events import EventType, RelayEvent
+from .per_turn import PerTurnRuntime
+
+# Tools whose CLIs exit after each turn and need per-turn subprocess restarts.
+_PER_TURN_TOOLS: dict[str, tuple[type[AgentRuntime], str]] = {
+    "claude":      (ClaudeStructuredRuntime, "--resume"),
+    "claude-code": (ClaudeStructuredRuntime, "--resume"),
+    "gemini":      (GeminiStructuredRuntime, "--resume"),
+}
 
 logger = logging.getLogger(__name__)
 
@@ -74,14 +84,28 @@ class RelaySession:
         ))
 
         try:
-            self._runtime = self._adapter.create_runtime(
-                session_id=self.session_id,
-                folder=self.folder,
-                model=self.model,
-                extra_args=self.extra_args,
-                env=env,
-                config=self.config,
-            )
+            tool_lower = self.tool.lower()
+            per_turn_info = _PER_TURN_TOOLS.get(tool_lower)
+            if per_turn_info:
+                runtime_class, resume_flag = per_turn_info
+                self._runtime = PerTurnRuntime(
+                    tool=self.tool,
+                    session_id=self.session_id,
+                    cmd=cmd,
+                    cwd=self.folder,
+                    env=env,
+                    runtime_class=runtime_class,
+                    resume_flag=resume_flag,
+                )
+            else:
+                self._runtime = self._adapter.create_runtime(
+                    session_id=self.session_id,
+                    folder=self.folder,
+                    model=self.model,
+                    extra_args=self.extra_args,
+                    env=env,
+                    config=self.config,
+                )
             await self._runtime.start()
         except FileNotFoundError:
             await self._send(ws, RelayEvent(
