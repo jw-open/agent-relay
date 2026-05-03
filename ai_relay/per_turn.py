@@ -171,6 +171,13 @@ class PerTurnRuntime(AgentRuntime):
                 await self._events.put(event)
         except asyncio.CancelledError:
             pass
+        except Exception as exc:
+            logger.error("[per-turn:%s] transport error: %s", self.session_id, exc)
+            await self._events.put(RelayEvent(
+                type=EventType.ERROR,
+                session_id=self.session_id,
+                text=f"Relay error: {exc}",
+            ))
 
     @staticmethod
     def _extract_prompt(msg: dict[str, Any]) -> Optional[str]:

@@ -4,6 +4,16 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.6] — 2026-05-03
+
+### Fixed
+- `PerTurnRuntime._pump_turn`: transport errors (e.g. `LimitOverrunError`, `ValueError`)
+  are now caught and emitted as `error` relay events to the frontend.  Previously these
+  exceptions propagated unhandled, leaving the session in an indefinite "working" state
+  with no visible feedback.
+
+---
+
 ## [0.4.5] — 2026-05-03
 
 ### Fixed
