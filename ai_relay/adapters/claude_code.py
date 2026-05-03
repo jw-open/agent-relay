@@ -27,6 +27,8 @@ class ClaudeStructuredRuntime(AgentRuntime):
         self._stderr_task: Optional[asyncio.Task[None]] = None
 
     async def start(self) -> None:
+        from ..claude_auth import ensure_claude_token
+        ensure_claude_token(self.transport.env)
         await self.transport.start()
         self._stderr_task = asyncio.create_task(self._read_stderr())
 
