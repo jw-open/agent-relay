@@ -21,6 +21,12 @@ AUTH_VERTEX_AI = "vertex-ai"
 
 
 def _creds_path(env: dict[str, str]) -> str:
+    # GEMINI_CLI_HOME lets the relay locate credential files from a path that
+    # may differ from the subprocess HOME (e.g. containerised multi-user setups
+    # where HOME is the container-side path but the relay runs on the host side).
+    gemini_home = env.get("GEMINI_CLI_HOME")
+    if gemini_home:
+        return os.path.join(gemini_home, "oauth_creds.json")
     home = env.get("HOME", os.path.expanduser("~"))
     return os.path.join(home, ".gemini", "oauth_creds.json")
 

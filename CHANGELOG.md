@@ -4,6 +4,16 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.17] — 2026-05-04
+
+### Fixed
+- `gemini_auth.py`: `_creds_path()` now checks `GEMINI_CLI_HOME` env var first
+  (mirrors `_settings_path` behaviour). Fixes containerised deployments where
+  `HOME` is the container-side path (`/home/labuser`) but the relay process runs
+  inside a different container that sees the workspace at a different path.
+
+---
+
 ## [0.4.16] — 2026-05-04
 
 ### Fixed
