@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 # Sourced from Claude Code 2.1.88 src-extracted/src/constants/oauth.ts
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_SCOPES = (
     "user:profile user:inference user:sessions:claude_code "
     "user:mcp_servers user:file_upload"
@@ -74,11 +73,11 @@ def _needs_refresh(creds: dict) -> bool:
     return (now_ms + REFRESH_BUFFER_MS) >= expires_at
 
 
-def _do_refresh(refresh_token: str) -> Optional[dict]:
+def _do_refresh(refresh_token: str, client_id: str) -> Optional[dict]:
     payload = json.dumps({
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "client_id": OAUTH_CLIENT_ID,
+        "client_id": client_id,
         "scope": OAUTH_SCOPES,
     }).encode()
 
@@ -107,38 +106,29 @@ def ensure_claude_token(env: dict[str, str]) -> None:
     Mimics the exact refresh flow used by Claude Code itself.
     No-ops if credentials are not found, have no refresh token, or are still fresh.
     """
+    # Prioritize credentials from env (can be injected by RelaySession from handshake)
+    client_id = env.get("CLAUDE_OAUTH_CLIENT_ID") or os.getenv("CLAUDE_OAUTH_CLIENT_ID")
+    if not client_id:
+        logger.debug("Claude OAuth client ID missing — skipping token refresh.")
+        return
+
     path = _credentials_path(env)
     creds = _read_credentials(path)
     if not creds:
-        logger.debug("No credentials file at %s — skipping token refresh", path)
         return
 
     oauth = creds.get("claudeAiOauth", {})
     _prefer_oauth(env, oauth)
     refresh_token = oauth.get("refreshToken")
     if not refresh_token:
-        logger.debug("No refreshToken in credentials — skipping token refresh")
         return
 
     if not _needs_refresh(creds):
-        expires_at = oauth.get("expiresAt", 0)
-        now_ms = int(time.time() * 1000)
-        logger.debug(
-            "Claude token still valid — %.1f min remaining",
-            (expires_at - now_ms) / 60000,
-        )
         return
 
-    expires_at = oauth.get("expiresAt", 0)
-    now_ms = int(time.time() * 1000)
-    remaining_min = (expires_at - now_ms) / 60000
-    logger.info(
-        "Claude token expires in %.1f min — refreshing via OAuth", remaining_min
-    )
-
-    result = _do_refresh(refresh_token)
+    logger.info("Claude token expiring soon — refreshing via OAuth")
+    result = _do_refresh(refresh_token, client_id)
     if not result:
-        logger.warning("OAuth refresh failed — Claude subprocess may hit 401")
         return
 
     now_ms = int(time.time() * 1000)
@@ -150,6 +140,4 @@ def ensure_claude_token(env: dict[str, str]) -> None:
 
     creds["claudeAiOauth"] = oauth
     _write_credentials(path, creds)
-
-    new_expiry_min = int(result["expires_in"]) / 60
-    logger.info("Claude token refreshed — valid for %.0f min", new_expiry_min)
+    logger.info("Claude token refreshed")

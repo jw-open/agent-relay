@@ -12,8 +12,9 @@ from ..transports import PtyTransport
 class AgentRuntime(ABC):
     """Running adapter instance for one relay session."""
 
-    def __init__(self, session_id: str):
+    def __init__(self, session_id: str, config: Optional[dict[str, Any]] = None):
         self.session_id = session_id
+        self.config = config or {}
 
     @abstractmethod
     async def start(self) -> None:
@@ -46,8 +47,9 @@ class PtyAgentRuntime(AgentRuntime):
         cwd: str,
         env: dict[str, str],
         adapter: type["BaseAdapter"],
+        config: Optional[dict[str, Any]] = None,
     ):
-        super().__init__(session_id)
+        super().__init__(session_id, config)
         self.adapter = adapter
         self.transport = PtyTransport(cmd, cwd, env, session_id)
 
@@ -133,4 +135,5 @@ class BaseAdapter(ABC):
             cwd=folder,
             env=env,
             adapter=cls,
+            config=config,
         )

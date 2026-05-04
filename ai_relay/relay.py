@@ -25,7 +25,6 @@ from .per_turn import PerTurnRuntime
 _PER_TURN_TOOLS: dict[str, tuple[type[AgentRuntime], str]] = {
     "claude":      (ClaudeStructuredRuntime, "--resume"),
     "claude-code": (ClaudeStructuredRuntime, "--resume"),
-    "gemini":      (GeminiStructuredRuntime, "--resume"),
 }
 
 logger = logging.getLogger(__name__)
@@ -64,6 +63,23 @@ class RelaySession:
         logger.info("[%s] Starting: %s in %s", self.session_id, cmd, self.folder)
 
         env = self._build_env(cmd[0]) if cmd else self._build_env("")
+        
+        # Merge handshake-provided environment variables
+        handshake_env = self.config.get("env")
+        if isinstance(handshake_env, dict):
+            env.update({str(k): str(v) for k, v in handshake_env.items()})
+            
+        # Dynamically ingest OAuth credentials from handshake if present
+        # This matches the "Codex way" of injecting settings into the environment.
+        if "oauth_client_id" in self.config:
+            client_id = str(self.config["oauth_client_id"])
+            env.setdefault("CLAUDE_OAUTH_CLIENT_ID", client_id)
+            env.setdefault("GEMINI_OAUTH_CLIENT_ID", client_id)
+            
+        if "oauth_client_secret" in self.config:
+            client_secret = str(self.config["oauth_client_secret"])
+            env.setdefault("GEMINI_OAUTH_CLIENT_SECRET", client_secret)
+
         logger.debug("[%s] PATH: %s", self.session_id, env.get("PATH", "(not set)"))
         if cmd:
             logger.debug("[%s] resolved binary: %s", self.session_id, shutil.which(cmd[0], path=env.get("PATH")))
@@ -96,6 +112,7 @@ class RelaySession:
                     env=env,
                     runtime_class=runtime_class,
                     resume_flag=resume_flag,
+                    config=self.config,
                 )
             else:
                 self._runtime = self._adapter.create_runtime(

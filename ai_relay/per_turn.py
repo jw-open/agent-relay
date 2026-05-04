@@ -47,8 +47,9 @@ class PerTurnRuntime(AgentRuntime):
         env: dict[str, str],
         runtime_class: Type[AgentRuntime],
         resume_flag: str = "--resume",
+        config: Optional[dict[str, Any]] = None,
     ) -> None:
-        super().__init__(session_id)
+        super().__init__(session_id, config)
         self.tool = tool
         self._base_cmd = cmd
         self._cwd = cwd
@@ -140,10 +141,11 @@ class PerTurnRuntime(AgentRuntime):
             self._current = self._runtime_class(
                 self.session_id, cmd, self._cwd, self._env,
                 claude_session_id=self._agent_session_id,
+                config=self.config,
             )
         except TypeError:
             # Fallback for runtimes that don't accept claude_session_id (e.g. Gemini)
-            self._current = self._runtime_class(self.session_id, cmd, self._cwd, self._env)
+            self._current = self._runtime_class(self.session_id, cmd, self._cwd, self._env, config=self.config)
         await self._current.start()
         await self._current.handle_client_message(msg)
 

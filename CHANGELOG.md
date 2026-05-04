@@ -4,6 +4,28 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.9] — 2026-05-04
+
+### Fixed
+- Gemini ACP startup now fails fast with surfaced errors instead of hanging when
+  authentication is missing or invalid.
+- Gemini OAuth credentials in `HOME/.gemini/oauth_creds.json` now set
+  `security.auth.selectedType=oauth-personal` and can take precedence over API
+  environment credentials with `AI_RELAY_GEMINI_PREFER_OAUTH=1`.
+- Gemini image blocks and permission responses now follow the current ACP
+  schema used by Gemini CLI 0.40.x.
+
+---
+
+## [0.4.8] — 2026-05-03
+
+### Fixed
+- Codex ChatGPT auth in `HOME/.codex/auth.json` can now take precedence over
+  API-key environment credentials when `AI_RELAY_CODEX_PREFER_CHATGPT=1`,
+  matching Lab's per-user isolated auth model.
+
+---
+
 ## [0.4.7] — 2026-05-03
 
 ### Fixed

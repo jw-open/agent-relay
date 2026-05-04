@@ -20,8 +20,9 @@ class ClaudeStructuredRuntime(AgentRuntime):
         cwd: str,
         env: dict[str, str],
         claude_session_id: Optional[str] = None,
+        config: Optional[dict[str, Any]] = None,
     ):
-        super().__init__(session_id)
+        super().__init__(session_id, config)
         # claude_session_id is Claude Code's own conversation ID (captured from
         # system/init on the first turn).  It goes into the stream-json stdin payload
         # and is separate from the relay's session_id (which is a DB UUID).
@@ -342,4 +343,5 @@ class ClaudeCodeAdapter(BaseAdapter):
             cmd=cls.build_command(folder, model, extra_args),
             cwd=folder,
             env=env,
+            config=config,
         )

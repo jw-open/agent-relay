@@ -40,6 +40,8 @@ class CodexAppServerRuntime(AgentRuntime):
         self._sandbox = self.config.get("sandbox")
 
     async def start(self) -> None:
+        from ..codex_auth import ensure_codex_auth
+        ensure_codex_auth(self.transport.env)
         await self.transport.start()
         self._reader_task = asyncio.create_task(self._read_stdout())
         self._stderr_task = asyncio.create_task(self._read_stderr())
