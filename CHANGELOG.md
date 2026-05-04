@@ -4,6 +4,15 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.10] — 2026-05-04
+
+### Fixed
+- Runtime startup failures are now emitted as structured `error` events before
+  the WebSocket closes. Gemini auth failures no longer appear as silent
+  frontend disconnects.
+
+---
+
 ## [0.4.9] — 2026-05-04
 
 ### Fixed

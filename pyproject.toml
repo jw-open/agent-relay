@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-relay"
-version = "0.4.9"
+version = "0.4.10"
 description = "WebSocket relay that bridges AI coding agent CLIs (Claude Code, Codex, Gemini CLI, Snowflake Cortex) to any web interface — stream reasoning, tool calls, and file changes in real time."
 readme = "README.md"
 license = { file = "LICENSE" }

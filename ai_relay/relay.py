@@ -131,6 +131,14 @@ class RelaySession:
                 text=f"Command not found: {cmd[0]}. Is it installed and on PATH?",
             ))
             return
+        except Exception as exc:
+            logger.exception("[%s] Failed to start %s runtime", self.session_id, self.tool)
+            await self._send(ws, RelayEvent(
+                type=EventType.ERROR,
+                session_id=self.session_id,
+                text=str(exc) or f"Failed to start {self.tool} runtime",
+            ))
+            return
 
         # Run the process/API reader and WS input pump concurrently. Some
         # structured adapters are persistent and only emit after client input,
