@@ -148,7 +148,9 @@ class GeminiStructuredRuntime(AgentRuntime):
 
         async def _do_prompt(p: dict) -> None:
             try:
-                result = await self._request("session/prompt", p)
+                # 5-minute timeout: session/prompt waits for the full turn, including
+                # any user permission interactions that may take time to respond to.
+                result = await self._request("session/prompt", p, timeout=300)
             except Exception as exc:
                 await self._event_queue.put(RelayEvent(
                     type=EventType.ERROR,
@@ -188,12 +190,12 @@ class GeminiStructuredRuntime(AgentRuntime):
     async def wait(self) -> Optional[int]:
         return await self.transport.wait()
 
-    async def _request(self, method: str, params: dict[str, Any]) -> Any:
+    async def _request(self, method: str, params: dict[str, Any], timeout: float = 60) -> Any:
         req_id = self._next_id
         self._next_id += 1
         future = asyncio.get_running_loop().create_future()
         self._pending_requests[req_id] = future
-        
+
         payload = {
             "jsonrpc": "2.0",
             "method": method,
@@ -202,7 +204,7 @@ class GeminiStructuredRuntime(AgentRuntime):
         }
         await self.transport.write_json_line(json.dumps(payload))
         try:
-            return await asyncio.wait_for(future, timeout=60)
+            return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError as exc:
             self._pending_requests.pop(req_id, None)
             raise RuntimeError(f"Timed out waiting for Gemini ACP {method}") from exc

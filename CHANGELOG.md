@@ -4,6 +4,17 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.16] — 2026-05-04
+
+### Fixed
+- `gemini.py`: `session/prompt` timeout raised from 60 s to 300 s (5 min).
+  Gemini permission dialogs require the user to respond before the RPC
+  completes; the 60 s hard limit caused spurious "Timed out" errors during
+  any interactive permission flow. Other RPCs (initialize, session/new,
+  session/cancel) retain the 60 s timeout.
+
+---
+
 ## [0.4.15] — 2026-05-04
 
 ### Fixed
