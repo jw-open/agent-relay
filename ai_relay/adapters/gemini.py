@@ -120,7 +120,7 @@ class GeminiStructuredRuntime(AgentRuntime):
                         "mimeType": source.get("media_type", "image/png"),
                         "data": source.get("data", ""),
                     })
-                elif b_type in {"inline_data", "image"}:
+                elif b_type == "inline_data":
                     prompt_parts.append(self._normalize_content_block(block))
                 else:
                     prompt_parts.append({"type": "text", "text": json.dumps(block)})
@@ -258,14 +258,7 @@ class GeminiStructuredRuntime(AgentRuntime):
                         future = self._pending_requests.pop(req_id)
                         if not future.done():
                             future.set_result(msg)
-                    
-                    # If it's a result of session/prompt, we might want to emit it
-                    await self._event_queue.put(RelayEvent(
-                        type=EventType.STATUS,
-                        session_id=self.session_id,
-                        status="result",
-                        raw=msg,
-                    ))
+                        # Internal RPC response — don't surface to frontend
                 else:
                     await self._event_queue.put(RelayEvent(type=EventType.STDOUT, session_id=self.session_id, text=text))
         except asyncio.CancelledError:

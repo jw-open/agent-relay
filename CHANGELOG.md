@@ -4,6 +4,19 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.11] — 2026-05-04
+
+### Fixed
+- `gemini.py`: STATUS event no longer emitted for internal RPC responses
+  (`initialize`, `session/new`) — only user-visible updates reach the frontend.
+- `gemini.py`: Dead code `elif b_type in {"inline_data", "image"}` corrected to
+  `elif b_type == "inline_data"` (image was already handled above).
+- `relay.py`: Removed incorrect `CLAUDE_OAUTH_CLIENT_ID` env injection (unused
+  by Claude Code); Gemini OAuth config keys renamed to `gemini_oauth_client_id`
+  / `gemini_oauth_client_secret`.
+
+---
+
 ## [0.4.10] — 2026-05-04
 
 ### Fixed

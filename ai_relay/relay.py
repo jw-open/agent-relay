@@ -69,16 +69,12 @@ class RelaySession:
         if isinstance(handshake_env, dict):
             env.update({str(k): str(v) for k, v in handshake_env.items()})
             
-        # Dynamically ingest OAuth credentials from handshake if present
-        # This matches the "Codex way" of injecting settings into the environment.
-        if "oauth_client_id" in self.config:
-            client_id = str(self.config["oauth_client_id"])
-            env.setdefault("CLAUDE_OAUTH_CLIENT_ID", client_id)
-            env.setdefault("GEMINI_OAUTH_CLIENT_ID", client_id)
-            
-        if "oauth_client_secret" in self.config:
-            client_secret = str(self.config["oauth_client_secret"])
-            env.setdefault("GEMINI_OAUTH_CLIENT_SECRET", client_secret)
+        # Allow callers to inject Gemini OAuth client credentials via handshake config.
+        # These are needed by gemini_auth.py for token refresh inside the subprocess env.
+        if "gemini_oauth_client_id" in self.config:
+            env.setdefault("GEMINI_OAUTH_CLIENT_ID", str(self.config["gemini_oauth_client_id"]))
+        if "gemini_oauth_client_secret" in self.config:
+            env.setdefault("GEMINI_OAUTH_CLIENT_SECRET", str(self.config["gemini_oauth_client_secret"]))
 
         logger.debug("[%s] PATH: %s", self.session_id, env.get("PATH", "(not set)"))
         if cmd:
