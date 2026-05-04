@@ -187,6 +187,10 @@ server = RelayServer(host="0.0.0.0", port=8765)
 server.run()
 ```
 
+## Documentation
+
+- [Architecture & Developer Guide](docs/architecture.md) — internals, event system, auth, turn lifecycle, reconnect handling, adding providers, containerised deployment
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
