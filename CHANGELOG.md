@@ -4,6 +4,15 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.15] — 2026-05-04
+
+### Fixed
+- `codex.py`: `rawResponseItem/completed` for reasoning items now emits `text` from
+  the item's `summary` array (o1-style visible thinking). Previously no text was set,
+  so the reasoning event was invisible in the UI.
+
+---
+
 ## [0.4.14] — 2026-05-04
 
 ### Fixed

@@ -461,10 +461,17 @@ class CodexAppServerRuntime(AgentRuntime):
                 )
             ]
         if item_type == "reasoning":
+            # Extract summary text (o1-style visible thinking) or encrypted reasoning.
+            summary_parts = item.get("summary") or []
+            summary_text = " ".join(
+                p.get("text", "") for p in summary_parts
+                if isinstance(p, dict) and p.get("type") in {"summary_text", "text"}
+            )
             return [
                 RelayEvent(
                     type=EventType.REASONING,
                     session_id=self.session_id,
+                    text=summary_text or None,
                     content=item,
                     raw=raw,
                     metadata={"method": "rawResponseItem/completed"},
