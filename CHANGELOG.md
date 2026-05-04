@@ -4,6 +4,18 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.12] — 2026-05-04
+
+### Fixed
+- `gemini.py`: `session/update` events now correctly extract the inner `update`
+  object from ACP JSON-RPC params before passing to `_events_from_update`.
+  Previously, the full `params` dict (`{"sessionId": "...", "update": {...}}`)
+  was passed, causing `sessionUpdate` lookup to return `None` and silently
+  dropping ALL Gemini agent responses (text, reasoning, tool calls) to the
+  frontend.
+
+---
+
 ## [0.4.11] — 2026-05-04
 
 ### Fixed

@@ -229,7 +229,10 @@ class GeminiStructuredRuntime(AgentRuntime):
                     method = msg["method"]
                     params = msg.get("params", {})
                     if method == "session/update":
-                        for event in self._events_from_update(params):
+                        # params = {"sessionId": "...", "update": {...}}
+                        # _events_from_update expects the inner update object.
+                        update_obj = params.get("update", params) if isinstance(params, dict) else params
+                        for event in self._events_from_update(update_obj):
                             await self._event_queue.put(event)
                     elif method == "session/request_permission":
                         tool_call = params.get("toolCall", {}) if isinstance(params, dict) else {}
