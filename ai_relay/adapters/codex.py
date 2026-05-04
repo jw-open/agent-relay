@@ -386,7 +386,13 @@ class CodexAppServerRuntime(AgentRuntime):
         if method in {"warning", "guardianWarning", "configWarning", "deprecationNotice"}:
             return [RelayEvent(type=EventType.CONTEXT_WARNING, text=str(params.get("message") or params), **base)]
         if method == "error":
-            return [RelayEvent(type=EventType.ERROR, text=str(params.get("message") or params), **base)]
+            # Codex error notification params: {"error": {"message": "...", ...}, "willRetry": bool, ...}
+            err = params.get("error")
+            if isinstance(err, dict):
+                msg = err.get("message") or str(err)
+            else:
+                msg = params.get("message") or str(params)
+            return [RelayEvent(type=EventType.ERROR, text=msg, **base)]
         return [RelayEvent(type=EventType.STREAM_EVENT, content=params, **base)]
 
     def _item_event(self, item: dict[str, Any], method: str, raw: dict[str, Any]) -> Optional[RelayEvent]:

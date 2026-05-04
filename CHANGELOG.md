@@ -4,6 +4,16 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.14] — 2026-05-04
+
+### Fixed
+- `codex.py`: `error` notification now correctly extracts `params["error"]["message"]`
+  instead of `params["message"]` (which was always `None`). Previously Codex policy
+  errors (e.g. cybersecurity flagged content) rendered as raw Python dict repr;
+  now shows the user-friendly message string.
+
+---
+
 ## [0.4.13] — 2026-05-04
 
 ### Fixed
