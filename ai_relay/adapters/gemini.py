@@ -145,8 +145,38 @@ class GeminiStructuredRuntime(AgentRuntime):
         }
         if self._acp_session_id:
             params["sessionId"] = self._acp_session_id
-            
-        asyncio.create_task(self._request("session/prompt", params))
+
+        async def _do_prompt(p: dict) -> None:
+            try:
+                result = await self._request("session/prompt", p)
+            except Exception as exc:
+                await self._event_queue.put(RelayEvent(
+                    type=EventType.ERROR,
+                    session_id=self.session_id,
+                    text=str(exc),
+                ))
+                return
+            # The session/prompt RPC result arrives after all session/update
+            # notifications for the turn. Emit RESPONSE (success) or ERROR
+            # (quota/auth/etc.) so the frontend can reset its "working" state.
+            err = result.get("error") if isinstance(result, dict) else None
+            if err:
+                msg = err.get("message") if isinstance(err, dict) else str(err)
+                await self._event_queue.put(RelayEvent(
+                    type=EventType.ERROR,
+                    session_id=self.session_id,
+                    text=msg or "Gemini session/prompt error",
+                    raw=result,
+                ))
+            else:
+                await self._event_queue.put(RelayEvent(
+                    type=EventType.RESPONSE,
+                    session_id=self.session_id,
+                    text="",
+                    raw=result,
+                ))
+
+        asyncio.create_task(_do_prompt(params))
 
     async def stop(self) -> None:
         for task in (self._reader_task, self._stderr_task):

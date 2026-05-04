@@ -4,6 +4,16 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.13] — 2026-05-04
+
+### Fixed
+- `gemini.py`: `session/prompt` RPC result was silently discarded, leaving the
+  frontend stuck in "working" state indefinitely after each Gemini turn.
+  Now emits `RESPONSE` on success and `ERROR` on failure (quota exceeded,
+  auth error, timeout) so the frontend can reset its processing indicator.
+
+---
+
 ## [0.4.12] — 2026-05-04
 
 ### Fixed
