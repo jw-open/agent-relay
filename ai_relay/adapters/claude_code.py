@@ -3,6 +3,8 @@
 from __future__ import annotations
 import asyncio
 import json
+import os
+import tempfile
 from typing import Any, Optional
 
 from ..events import EventType, RelayEvent
@@ -21,6 +23,7 @@ class ClaudeStructuredRuntime(AgentRuntime):
         env: dict[str, str],
         claude_session_id: Optional[str] = None,
         config: Optional[dict[str, Any]] = None,
+        mcp_tmp: Optional[str] = None,
     ):
         super().__init__(session_id, config)
         # claude_session_id is Claude Code's own conversation ID (captured from
@@ -32,6 +35,7 @@ class ClaudeStructuredRuntime(AgentRuntime):
         self._stderr_queue: asyncio.Queue[RelayEvent] = asyncio.Queue()
         self._event_queue: asyncio.Queue[RelayEvent] = asyncio.Queue()
         self._stderr_task: Optional[asyncio.Task[None]] = None
+        self._mcp_tmp = mcp_tmp  # temp MCP config file to clean up on stop
 
     async def start(self) -> None:
         from ..claude_auth import ensure_claude_token
@@ -104,6 +108,12 @@ class ClaudeStructuredRuntime(AgentRuntime):
             except asyncio.CancelledError:
                 pass
         await self.transport.stop()
+        if self._mcp_tmp:
+            try:
+                os.unlink(self._mcp_tmp)
+            except OSError:
+                pass
+            self._mcp_tmp = None
 
     async def wait(self) -> Optional[int]:
         return await self.transport.wait()
@@ -338,10 +348,26 @@ class ClaudeCodeAdapter(BaseAdapter):
         env: dict[str, str],
         config: Optional[dict[str, Any]] = None,
     ) -> AgentRuntime:
+        cmd = cls.build_command(folder, model, extra_args)
+        mcp_tmp: Optional[str] = None
+
+        # MCP config support: write to a temp file and pass via --mcp-config.
+        # The handshake config may include {"mcp_config": {"mcpServers": {...}}}
+        mcp_config = (config or {}).get("mcp_config")
+        if isinstance(mcp_config, dict) and mcp_config.get("mcpServers"):
+            try:
+                fd, mcp_tmp = tempfile.mkstemp(suffix=".json", prefix="ai_relay_mcp_")
+                with os.fdopen(fd, "w") as f:
+                    json.dump(mcp_config, f)
+                cmd = cmd + ["--mcp-config", mcp_tmp]
+            except OSError:
+                mcp_tmp = None
+
         return ClaudeStructuredRuntime(
             session_id=session_id,
-            cmd=cls.build_command(folder, model, extra_args),
+            cmd=cmd,
             cwd=folder,
             env=env,
             config=config,
+            mcp_tmp=mcp_tmp,
         )

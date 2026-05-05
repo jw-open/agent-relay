@@ -84,9 +84,39 @@ class GeminiStructuredRuntime(AgentRuntime):
             request_id = msg.get("request_id")
             if request_id:
                 behavior = msg.get("behavior", "allow")
+                # Client may send optionId directly; otherwise pick from the options list
+                # that was echoed back in updatedInput/args.
+                # Gemini ACP option IDs: proceed_once, proceed_always, cancel
                 option_id = msg.get("optionId") or msg.get("option_id")
                 if not option_id:
-                    option_id = "allow_once" if behavior in {"allow", "approve"} else "reject_once"
+                    is_allow = behavior in {"allow", "approve"}
+                    options: list = []
+                    for key in ("updatedInput", "args"):
+                        src = msg.get(key)
+                        if isinstance(src, dict):
+                            options = src.get("options") or []
+                            if options:
+                                break
+                    _deny_tokens = {"cancel", "deny", "reject", "no"}
+                    if options:
+                        if is_allow:
+                            allow_opt = next(
+                                (o.get("optionId") for o in options
+                                 if isinstance(o, dict) and o.get("optionId")
+                                 and not any(t in (o.get("optionId") or "").lower() for t in _deny_tokens)),
+                                None,
+                            )
+                            option_id = allow_opt or "proceed_once"
+                        else:
+                            deny_opt = next(
+                                (o.get("optionId") for o in options
+                                 if isinstance(o, dict) and o.get("optionId")
+                                 and any(t in (o.get("optionId") or "").lower() for t in _deny_tokens)),
+                                None,
+                            )
+                            option_id = deny_opt or "cancel"
+                    else:
+                        option_id = "proceed_once" if is_allow else "cancel"
                 payload = {
                     "jsonrpc": "2.0",
                     "id": request_id,
@@ -97,6 +127,7 @@ class GeminiStructuredRuntime(AgentRuntime):
                         }
                     }
                 }
+                logger.debug("[%s] permission_response → optionId=%r", self.session_id, option_id)
                 await self.transport.write_json_line(json.dumps(payload))
             return
 

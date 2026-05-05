@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import uuid
 from typing import Any, Optional
 
@@ -125,6 +126,7 @@ class RelaySession:
         self.workspace_root = os.path.abspath(workspace_root) if workspace_root else None
         self._adapter: type[BaseAdapter] = get_adapter(tool)
         self._runtime: Optional[AgentRuntime] = None
+        self._mcp_tmp: Optional[str] = None  # temp MCP config file; cleaned up in stop()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -162,6 +164,23 @@ class RelaySession:
         try:
             tool_lower = self.tool.lower()
             per_turn_info = _PER_TURN_TOOLS.get(tool_lower)
+
+            # MCP config: write a temp file and inject --mcp-config into cmd.
+            # This applies to PerTurnRuntime tools (claude/claude-code) where cmd
+            # is passed directly.  Other adapters handle mcp_config in create_runtime().
+            mcp_config = self.config.get("mcp_config")
+            if (per_turn_info and tool_lower in {"claude", "claude-code"}
+                    and isinstance(mcp_config, dict) and mcp_config.get("mcpServers")):
+                try:
+                    fd, self._mcp_tmp = tempfile.mkstemp(suffix=".json", prefix="ai_relay_mcp_")
+                    with os.fdopen(fd, "w") as f:
+                        json.dump(mcp_config, f)
+                    cmd = cmd + ["--mcp-config", self._mcp_tmp]
+                    logger.debug("[%s] MCP config written to %s", self.session_id, self._mcp_tmp)
+                except OSError as exc:
+                    logger.warning("[%s] Failed to write MCP config: %s", self.session_id, exc)
+                    self._mcp_tmp = None
+
             if per_turn_info:
                 runtime_class, resume_flag = per_turn_info
                 self._runtime = PerTurnRuntime(
@@ -229,6 +248,12 @@ class RelaySession:
     async def stop(self) -> None:
         if self._runtime:
             await self._runtime.stop()
+        if self._mcp_tmp:
+            try:
+                os.unlink(self._mcp_tmp)
+            except OSError:
+                pass
+            self._mcp_tmp = None
 
     def _build_env(self, binary: str) -> dict[str, str]:
         """Copy os.environ and auto-expand PATH with nvm/node bin dirs if binary not found."""
