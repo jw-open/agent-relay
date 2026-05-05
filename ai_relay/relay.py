@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import uuid
 from typing import Any, Optional
@@ -20,6 +21,7 @@ from .adapters.claude_code import ClaudeStructuredRuntime
 from .adapters.gemini import GeminiStructuredRuntime
 from .events import EventType, RelayEvent
 from .per_turn import PerTurnRuntime
+from .transports import WS_MAX_SIZE
 
 # Tools whose CLIs exit after each turn and need per-turn subprocess restarts.
 _PER_TURN_TOOLS: dict[str, tuple[type[AgentRuntime], str]] = {
@@ -28,6 +30,73 @@ _PER_TURN_TOOLS: dict[str, tuple[type[AgentRuntime], str]] = {
 }
 
 logger = logging.getLogger(__name__)
+
+# ── Handshake env-var allowlist ───────────────────────────────────────────────
+# Client-supplied env vars (handshake "env" dict) are restricted to this set.
+# Variables that influence the dynamic linker, Python import machinery, or shell
+# initialization are blocked to prevent privilege escalation / code injection.
+
+_SAFE_ENV_PREFIXES = (
+    "AI_RELAY_",
+    "CLAUDE_",
+    "CODEX_",
+    "GEMINI_",
+    "GOOGLE_",
+    "ANTHROPIC_",
+    "OPENAI_",
+    "AZURE_",
+    "AWS_",
+    "LAB_",
+    "NODE_",
+    "NPM_",
+)
+
+_SAFE_ENV_EXACT = frozenset({
+    "HOME", "PATH", "TERM", "SHELL", "LANG", "LC_ALL",
+    "XDG_DATA_HOME", "XDG_CONFIG_HOME",
+})
+
+_BLOCKED_ENV_EXACT = frozenset({
+    # Dynamic-linker / loader injection vectors
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "LD_DEBUG",
+    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+    # Python import path override
+    "PYTHONPATH", "PYTHONSTARTUP",
+    # Shell startup files
+    "BASH_ENV", "ENV", "CDPATH",
+})
+
+# ── Extra-args validation ─────────────────────────────────────────────────────
+# Block args that contain shell-special chars, null bytes, or look like paths.
+# Callers that need arbitrary flags should run ai-relay programmatically rather
+# than via the WebSocket protocol.
+_SAFE_ARG_RE = re.compile(r'^[A-Za-z0-9_\-\.=,@:]+$')
+
+
+def _filter_handshake_env(raw: dict[str, Any]) -> dict[str, str]:
+    """Return a sanitised copy of the client-supplied env dict."""
+    safe: dict[str, str] = {}
+    for k, v in raw.items():
+        key = str(k)
+        val = str(v)
+        if key in _BLOCKED_ENV_EXACT:
+            logger.warning("Blocked client env var %r (blocked list)", key)
+            continue
+        if key in _SAFE_ENV_EXACT or any(key.startswith(p) for p in _SAFE_ENV_PREFIXES):
+            safe[key] = val
+        else:
+            logger.warning("Dropped client env var %r (not in allowlist)", key)
+    return safe
+
+
+def _validate_extra_args(args: list[str]) -> None:
+    for arg in args:
+        if not _SAFE_ARG_RE.match(arg):
+            raise ValueError(
+                f"extra_arg {arg!r} contains disallowed characters. "
+                "Only alphanumerics, hyphens, underscores, dots, equals, commas, "
+                "at-signs, and colons are permitted."
+            )
 
 
 class RelaySession:
@@ -45,6 +114,7 @@ class RelaySession:
         model: Optional[str] = None,
         extra_args: Optional[list[str]] = None,
         config: Optional[dict[str, Any]] = None,
+        workspace_root: Optional[str] = None,
     ):
         self.session_id = session_id
         self.tool = tool
@@ -52,6 +122,7 @@ class RelaySession:
         self.model = model
         self.extra_args = extra_args or []
         self.config = config or {}
+        self.workspace_root = os.path.abspath(workspace_root) if workspace_root else None
         self._adapter: type[BaseAdapter] = get_adapter(tool)
         self._runtime: Optional[AgentRuntime] = None
 
@@ -63,18 +134,11 @@ class RelaySession:
         logger.info("[%s] Starting: %s in %s", self.session_id, cmd, self.folder)
 
         env = self._build_env(cmd[0]) if cmd else self._build_env("")
-        
-        # Merge handshake-provided environment variables
+
+        # Merge allowlisted client-supplied env vars from handshake config.
         handshake_env = self.config.get("env")
         if isinstance(handshake_env, dict):
-            env.update({str(k): str(v) for k, v in handshake_env.items()})
-            
-        # Allow callers to inject Gemini OAuth client credentials via handshake config.
-        # These are needed by gemini_auth.py for token refresh inside the subprocess env.
-        if "gemini_oauth_client_id" in self.config:
-            env.setdefault("GEMINI_OAUTH_CLIENT_ID", str(self.config["gemini_oauth_client_id"]))
-        if "gemini_oauth_client_secret" in self.config:
-            env.setdefault("GEMINI_OAUTH_CLIENT_SECRET", str(self.config["gemini_oauth_client_secret"]))
+            env.update(_filter_handshake_env(handshake_env))
 
         logger.debug("[%s] PATH: %s", self.session_id, env.get("PATH", "(not set)"))
         if cmd:
@@ -136,9 +200,6 @@ class RelaySession:
             ))
             return
 
-        # Run the process/API reader and WS input pump concurrently. Some
-        # structured adapters are persistent and only emit after client input,
-        # so either side ending should tear down the session.
         ws_task = asyncio.create_task(self._read_ws(ws))
         runtime_task = asyncio.create_task(self._read_runtime(ws))
         try:
@@ -177,11 +238,9 @@ class RelaySession:
         if not binary:
             return env
 
-        # If binary is already findable, nothing to do.
         if shutil.which(binary, path=env.get("PATH")) is not None:
             return env
 
-        # Auto-detect: scan ~/.nvm/versions/node/*/bin for the binary.
         nvm_root = os.path.expanduser("~/.nvm/versions/node")
         extra: list[str] = []
         if os.path.isdir(nvm_root):
@@ -195,7 +254,6 @@ class RelaySession:
             except OSError:
                 pass
 
-        # Also check ~/.local/bin, /usr/local/bin as fallbacks.
         for d in [os.path.expanduser("~/.local/bin"), "/usr/local/bin"]:
             if os.path.isfile(os.path.join(d, binary)) and d not in extra:
                 extra.append(d)
@@ -210,6 +268,11 @@ class RelaySession:
     def _preflight(self, cmd: list[str], env: dict[str, str]) -> Optional[str]:
         if not os.path.isdir(self.folder):
             return f"Working folder not found: {self.folder}"
+        if self.workspace_root and not self.folder.startswith(self.workspace_root + os.sep):
+            return (
+                f"Folder {self.folder!r} is outside the permitted workspace root "
+                f"{self.workspace_root!r}."
+            )
         if not cmd and self._adapter.requires_executable:
             return "Adapter produced an empty command."
         if cmd and self._adapter.requires_executable and shutil.which(cmd[0], path=env.get("PATH")) is None:
@@ -240,7 +303,6 @@ class RelaySession:
             logger.debug("[%s] WS recv: %r", self.session_id, raw[:200] if isinstance(raw, str) else raw)
             try:
                 parsed = json.loads(raw) if isinstance(raw, str) else {}
-                # json.loads may return a non-dict (int, list…) for bare values like "1"
                 msg = parsed if isinstance(parsed, dict) else {"text": raw}
             except json.JSONDecodeError:
                 msg = {"text": raw}
@@ -262,8 +324,10 @@ class RelaySession:
     async def _send(ws: WebSocketServerProtocol, event: RelayEvent) -> None:
         try:
             await ws.send(event.to_json())
+        except ConnectionClosed:
+            pass  # client disconnected — normal teardown path
         except Exception:
-            pass
+            logger.warning("WebSocket send failed for event type %r", event.type, exc_info=True)
 
 
 class RelayServer:
@@ -271,15 +335,34 @@ class RelayServer:
     WebSocket server that accepts connections and spawns a RelaySession per client.
 
     Protocol (client → server on connect):
-        { "tool": "claude", "folder": "/path/to/project", "model": "sonnet" }
+        {
+          "tool": "claude",
+          "folder": "/path/to/project",
+          "model": "sonnet",
+          "session_id": "<optional uuid>",
+          "extra_args": ["--flag"],        # optional, restricted allowlist
+          "env": {"KEY": "value"},         # optional, allowlisted vars only
+        }
+
+    Security notes:
+      - ``env`` keys are filtered against an allowlist; loader-injection vars
+        (LD_PRELOAD, PYTHONPATH, etc.) are silently dropped.
+      - ``extra_args`` values must match ``[A-Za-z0-9_\\-.=,@:]+``.
+      - If *workspace_root* is set on the server, ``folder`` must be inside it.
+      - OAuth/API secrets must come from server-side env vars, not the handshake.
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8765):
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8765,
+        workspace_root: Optional[str] = None,
+    ):
         self.host = host
         self.port = port
+        self.workspace_root = workspace_root
 
     async def handle(self, ws: WebSocketServerProtocol) -> None:
-        # First message must be the session config
         try:
             config = await self._recv_handshake(ws)
         except ConnectionClosed:
@@ -303,6 +386,7 @@ class RelayServer:
             model=config.get("model"),
             extra_args=config.get("extra_args"),
             config=config,
+            workspace_root=self.workspace_root,
         )
         try:
             await session.start(ws)
@@ -323,25 +407,28 @@ class RelayServer:
             raise ValueError("handshake must be a JSON object")
 
         extra_args = config.get("extra_args")
-        if extra_args is not None and not isinstance(extra_args, list):
-            raise ValueError("extra_args must be a list of strings")
-        if extra_args is not None and not all(isinstance(arg, str) for arg in extra_args):
-            raise ValueError("extra_args must be a list of strings")
+        if extra_args is not None:
+            if not isinstance(extra_args, list):
+                raise ValueError("extra_args must be a list of strings")
+            if not all(isinstance(arg, str) for arg in extra_args):
+                raise ValueError("extra_args must be a list of strings")
+            _validate_extra_args(extra_args)
 
         return config
 
     async def _send_error(self, ws: WebSocketServerProtocol, text: str) -> None:
-        await ws.send(RelayEvent(
-            type=EventType.ERROR,
-            session_id="",
-            text=text,
-        ).to_json())
+        try:
+            await ws.send(RelayEvent(
+                type=EventType.ERROR,
+                session_id="",
+                text=text,
+            ).to_json())
+        except Exception:
+            pass
 
     async def serve(self) -> None:
         logger.info("ai-relay listening on ws://%s:%d", self.host, self.port)
-        # max_size raised to 50MB to support image attachment payloads (base64-encoded).
-        # The default 1MB limit causes WebSocket 1009 errors for images > ~750KB.
-        async with websockets.serve(self.handle, self.host, self.port, max_size=50 * 1024 * 1024):
+        async with websockets.serve(self.handle, self.host, self.port, max_size=WS_MAX_SIZE):
             await asyncio.Future()  # run forever
 
     def run(self) -> None:

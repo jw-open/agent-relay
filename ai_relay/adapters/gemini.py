@@ -3,12 +3,19 @@
 from __future__ import annotations
 import asyncio
 import json
+import logging
 import uuid
 from typing import Any, Optional
 
 from ..events import EventType, RelayEvent
 from ..transports import StructuredProcessTransport
 from .base import AgentRuntime, BaseAdapter
+
+logger = logging.getLogger(__name__)
+
+# Maximum events buffered before back-pressure is applied.
+# Prevents unbounded memory growth when the client disconnects mid-stream.
+_QUEUE_MAXSIZE = 500
 
 
 class GeminiStructuredRuntime(AgentRuntime):
@@ -25,7 +32,7 @@ class GeminiStructuredRuntime(AgentRuntime):
         super().__init__(session_id, config)
         self.transport = StructuredProcessTransport(cmd, cwd, env)
         self.cwd = cwd
-        self._event_queue: asyncio.Queue[Optional[RelayEvent]] = asyncio.Queue()
+        self._event_queue: asyncio.Queue[Optional[RelayEvent]] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
         self._reader_task: Optional[asyncio.Task[None]] = None
         self._stderr_task: Optional[asyncio.Task[None]] = None
         self._next_id = 1
@@ -299,15 +306,18 @@ class GeminiStructuredRuntime(AgentRuntime):
         except asyncio.CancelledError:
             pass
         except Exception as e:
+            logger.exception("[%s] Gemini stdout reader error", self.session_id)
             for future in self._pending_requests.values():
                 if not future.done():
                     future.set_exception(e)
             self._pending_requests.clear()
             await self._event_queue.put(RelayEvent(type=EventType.ERROR, session_id=self.session_id, text=f"Reader error: {e}"))
         finally:
+            exc = RuntimeError("Gemini ACP process exited")
             for future in self._pending_requests.values():
                 if not future.done():
-                    future.set_exception(RuntimeError("Gemini ACP process exited"))
+                    logger.debug("[%s] Resolving pending request with process-exit exception", self.session_id)
+                    future.set_exception(exc)
             self._pending_requests.clear()
             await self._event_queue.put(None)
 

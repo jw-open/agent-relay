@@ -10,6 +10,8 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
+from .auth_utils import env_truthy, read_json_file, write_json_file
+
 logger = logging.getLogger(__name__)
 
 OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -21,46 +23,13 @@ AUTH_VERTEX_AI = "vertex-ai"
 
 
 def _creds_path(env: dict[str, str]) -> str:
-    # GEMINI_CLI_HOME lets the relay locate credential files from a path that
-    # may differ from the subprocess HOME (e.g. containerised multi-user setups
-    # where HOME is the container-side path but the relay runs on the host side).
-    gemini_home = env.get("GEMINI_CLI_HOME")
-    if gemini_home:
-        return os.path.join(gemini_home, "oauth_creds.json")
     home = env.get("HOME", os.path.expanduser("~"))
     return os.path.join(home, ".gemini", "oauth_creds.json")
 
 
 def _settings_path(env: dict[str, str]) -> str:
-    gemini_home = env.get("GEMINI_CLI_HOME")
-    if gemini_home:
-        return os.path.join(gemini_home, "settings.json")
     home = env.get("HOME", os.path.expanduser("~"))
     return os.path.join(home, ".gemini", "settings.json")
-
-
-def _env_truthy(value: Optional[str]) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _read_creds(path: str) -> Optional[dict]:
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _write_creds(path: str, data: dict) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, path)  # atomic write
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
 
 
 def _has_oauth_creds(creds: Optional[dict]) -> bool:
@@ -70,23 +39,19 @@ def _has_oauth_creds(creds: Optional[dict]) -> bool:
 
 
 def _selected_auth_from_env(env: dict[str, str]) -> Optional[str]:
-    if _env_truthy(env.get("GOOGLE_GENAI_USE_VERTEXAI")):
+    if env_truthy(env.get("GOOGLE_GENAI_USE_VERTEXAI")):
         return AUTH_VERTEX_AI
     if env.get("GEMINI_API_KEY"):
         return AUTH_GEMINI_API_KEY
-    if _env_truthy(env.get("GOOGLE_GENAI_USE_GCA")):
+    if env_truthy(env.get("GOOGLE_GENAI_USE_GCA")):
         return AUTH_LOGIN_WITH_GOOGLE
     return None
 
 
 def _write_selected_auth(env: dict[str, str], auth_type: str) -> None:
     path = _settings_path(env)
-    try:
-        with open(path) as f:
-            settings = json.load(f)
-            if not isinstance(settings, dict):
-                settings = {}
-    except (OSError, json.JSONDecodeError):
+    settings = read_json_file(path) or {}
+    if not isinstance(settings, dict):
         settings = {}
 
     security = settings.setdefault("security", {})
@@ -102,11 +67,7 @@ def _write_selected_auth(env: dict[str, str], auth_type: str) -> None:
         return
 
     auth["selectedType"] = auth_type
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(settings, f, indent=2)
-    os.replace(tmp, path)
+    write_json_file(path, settings)
 
 
 def _needs_refresh(creds: dict) -> bool:
@@ -144,14 +105,14 @@ def ensure_gemini_auth(env: dict[str, str]) -> None:
     """
     Prepare Gemini CLI auth for ACP/headless use.
 
-    Gemini ACP uses `security.auth.selectedType` from settings when creating a
-    session. In Lab, OAuth credentials live under the isolated HOME, so make the
-    selected auth explicit and remove API-key env vars when OAuth is preferred.
+    Gemini ACP uses ``security.auth.selectedType`` from settings when creating a
+    session.  Make the selected auth explicit and remove API-key env vars when
+    OAuth credentials are preferred.
     """
     path = _creds_path(env)
-    creds = _read_creds(path)
+    creds = read_json_file(path)
     has_oauth = _has_oauth_creds(creds)
-    prefer_oauth = _env_truthy(env.get("AI_RELAY_GEMINI_PREFER_OAUTH"))
+    prefer_oauth = env_truthy(env.get("AI_RELAY_GEMINI_PREFER_OAUTH"))
 
     if has_oauth and prefer_oauth:
         for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI"):
@@ -166,20 +127,17 @@ def ensure_gemini_auth(env: dict[str, str]) -> None:
     else:
         return
 
-    if not has_oauth:
+    if not has_oauth or not creds:
         return
 
-    refresh_token = creds.get("refresh_token") if creds else None
-    if not refresh_token:
-        return
-
-    if not _needs_refresh(creds):
+    refresh_token = creds.get("refresh_token")
+    if not refresh_token or not _needs_refresh(creds):
         return
 
     client_id = env.get("GEMINI_OAUTH_CLIENT_ID") or os.getenv("GEMINI_OAUTH_CLIENT_ID")
     client_secret = env.get("GEMINI_OAUTH_CLIENT_SECRET") or os.getenv("GEMINI_OAUTH_CLIENT_SECRET")
     if not client_id or not client_secret:
-        logger.debug("Gemini OAuth client configuration missing; Gemini CLI will refresh tokens if needed.")
+        logger.debug("Gemini OAuth client credentials not set; CLI will refresh tokens internally.")
         return
 
     logger.info("Gemini token expiring soon — refreshing via OAuth")
@@ -192,6 +150,6 @@ def ensure_gemini_auth(env: dict[str, str]) -> None:
     if "refresh_token" in result:
         creds["refresh_token"] = result["refresh_token"]
     creds["expiry_date"] = now_ms + int(result["expires_in"]) * 1000
-    
-    _write_creds(path, creds)
+
+    write_json_file(path, creds)
     logger.info("Gemini token refreshed")

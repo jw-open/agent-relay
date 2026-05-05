@@ -28,7 +28,7 @@ class CodexAppServerRuntime(AgentRuntime):
         self.cwd = cwd
         self.model = model
         self.config = config or {}
-        self._queue: asyncio.Queue[Optional[RelayEvent]] = asyncio.Queue()
+        self._queue: asyncio.Queue[Optional[RelayEvent]] = asyncio.Queue(maxsize=500)
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._server_requests: dict[str, dict[str, Any]] = {}
@@ -336,64 +336,87 @@ class CodexAppServerRuntime(AgentRuntime):
         raw: dict[str, Any],
     ) -> list[RelayEvent]:
         base = {"session_id": self.session_id, "raw": raw, "metadata": {"method": method}}
-        if method in {"turn/started", "turn/completed"}:
-            turn = params.get("turn") or {}
-            self._turn_id = self._extract_id(turn) or self._turn_id
-            return [
-                RelayEvent(
-                    type=EventType.STATUS,
-                    status=method.split("/")[-1],
-                    metadata={**base["metadata"], "turn": turn},
-                    **{k: v for k, v in base.items() if k != "metadata"},
-                )
-            ]
+        return (
+            self._turn_status_events(method, params, base)
+            or self._thread_events(method, params, base)
+            or self._delta_events(method, params, base)
+            or self._item_lifecycle_events(method, params, raw, base)
+            or self._warning_error_events(method, params, base)
+            or [RelayEvent(type=EventType.STREAM_EVENT, content=params, **base)]
+        )
+
+    def _turn_status_events(
+        self, method: str, params: dict[str, Any], base: dict[str, Any]
+    ) -> list[RelayEvent]:
+        if method not in {"turn/started", "turn/completed"}:
+            return []
+        turn = params.get("turn") or {}
+        self._turn_id = self._extract_id(turn) or self._turn_id
+        return [RelayEvent(
+            type=EventType.STATUS,
+            status=method.split("/")[-1],
+            metadata={**base["metadata"], "turn": turn},
+            **{k: v for k, v in base.items() if k != "metadata"},
+        )]
+
+    def _thread_events(
+        self, method: str, params: dict[str, Any], base: dict[str, Any]
+    ) -> list[RelayEvent]:
         if method in {"thread/started", "thread/status/changed", "thread/tokenUsage/updated"}:
             return [RelayEvent(type=EventType.STATUS, status=method, content=params, **base)]
         if method == "thread/compacted":
             return [RelayEvent(type=EventType.CONTEXT_COMPACTED, content=params, **base)]
+        return []
+
+    def _delta_events(
+        self, method: str, params: dict[str, Any], base: dict[str, Any]
+    ) -> list[RelayEvent]:
+        delta = str(params.get("delta", ""))
         if method == "item/agentMessage/delta":
-            return [RelayEvent(type=EventType.RESPONSE, text=str(params.get("delta", "")), **base)]
+            return [RelayEvent(type=EventType.RESPONSE, text=delta, **base)]
         if method in {"item/reasoning/textDelta", "item/reasoning/summaryTextDelta", "item/plan/delta"}:
-            return [RelayEvent(type=EventType.REASONING, text=str(params.get("delta", "")), **base)]
+            return [RelayEvent(type=EventType.REASONING, text=delta, **base)]
         if method in {"command/exec/outputDelta", "item/commandExecution/outputDelta"}:
-            return [
-                RelayEvent(
-                    type=EventType.TOOL_PROGRESS,
-                    tool="commandExecution",
-                    tool_use_id=params.get("itemId") or params.get("callId"),
-                    text=str(params.get("delta", "")),
-                    **base,
-                )
-            ]
+            return [RelayEvent(
+                type=EventType.TOOL_PROGRESS,
+                tool="commandExecution",
+                tool_use_id=params.get("itemId") or params.get("callId"),
+                text=delta,
+                **base,
+            )]
         if method in {"item/fileChange/outputDelta", "item/fileChange/patchUpdated", "turn/diff/updated"}:
             return [RelayEvent(type=EventType.FILE_DIFF, content=params, diff=params.get("delta"), **base)]
         if method == "item/mcpToolCall/progress":
-            return [
-                RelayEvent(
-                    type=EventType.TOOL_PROGRESS,
-                    tool=params.get("tool"),
-                    tool_use_id=params.get("itemId"),
-                    content=params,
-                    **base,
-                )
-            ]
+            return [RelayEvent(
+                type=EventType.TOOL_PROGRESS,
+                tool=params.get("tool"),
+                tool_use_id=params.get("itemId"),
+                content=params,
+                **base,
+            )]
+        return []
+
+    def _item_lifecycle_events(
+        self, method: str, params: dict[str, Any], raw: dict[str, Any], base: dict[str, Any]
+    ) -> list[RelayEvent]:
         if method in {"item/started", "item/completed"}:
             item = params.get("item") or {}
             event = self._item_event(item, method, raw)
             return [event] if event else [RelayEvent(type=EventType.STREAM_EVENT, content=params, **base)]
         if method == "rawResponseItem/completed":
             return self._raw_response_item_events(params, raw)
+        return []
+
+    def _warning_error_events(
+        self, method: str, params: dict[str, Any], base: dict[str, Any]
+    ) -> list[RelayEvent]:
         if method in {"warning", "guardianWarning", "configWarning", "deprecationNotice"}:
             return [RelayEvent(type=EventType.CONTEXT_WARNING, text=str(params.get("message") or params), **base)]
         if method == "error":
-            # Codex error notification params: {"error": {"message": "...", ...}, "willRetry": bool, ...}
             err = params.get("error")
-            if isinstance(err, dict):
-                msg = err.get("message") or str(err)
-            else:
-                msg = params.get("message") or str(params)
-            return [RelayEvent(type=EventType.ERROR, text=msg, **base)]
-        return [RelayEvent(type=EventType.STREAM_EVENT, content=params, **base)]
+            msg: str = err.get("message") if isinstance(err, dict) else (params.get("message") or str(params))  # type: ignore[assignment]
+            return [RelayEvent(type=EventType.ERROR, text=str(msg or params), **base)]
+        return []
 
     def _item_event(self, item: dict[str, Any], method: str, raw: dict[str, Any]) -> Optional[RelayEvent]:
         item_type = item.get("type")

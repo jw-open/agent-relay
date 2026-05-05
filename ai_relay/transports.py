@@ -8,6 +8,14 @@ from typing import Optional
 
 from .pty_session import PtySession
 
+# StreamReader line buffer: 100 MB — Claude Code echoes full user messages
+# (including base64 images) as a single JSON line.  The default 64 KB limit
+# raises LimitOverrunError for any image-containing turn.
+SUBPROCESS_STREAM_LIMIT = 100 * 1024 * 1024
+
+# WebSocket max frame size exposed for callers that create the WS server.
+WS_MAX_SIZE = 50 * 1024 * 1024
+
 
 class PtyTransport:
     """PTY transport for terminal-first CLIs."""
@@ -63,34 +71,38 @@ class StructuredProcessTransport:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=self.env,
-            # Raise StreamReader line limit to 100 MB.
-            # Claude Code echoes the full user message (including base64 images) on
-            # stdout as a single JSON line.  The default 64 KB limit raises
-            # LimitOverrunError / ValueError for any image-containing turn.
-            limit=100 * 1024 * 1024,
+            limit=SUBPROCESS_STREAM_LIMIT,
         )
 
     async def readline(self) -> Optional[bytes]:
-        assert self._process is not None
-        assert self._process.stdout is not None
+        if self._process is None:
+            raise RuntimeError("Transport not started — call start() first")
+        if self._process.stdout is None:
+            raise RuntimeError("stdout pipe is not available")
         line = await self._process.stdout.readline()
         return line or None
 
     async def read_stderr(self) -> Optional[bytes]:
-        assert self._process is not None
-        assert self._process.stderr is not None
+        if self._process is None:
+            raise RuntimeError("Transport not started — call start() first")
+        if self._process.stderr is None:
+            raise RuntimeError("stderr pipe is not available")
         line = await self._process.stderr.readline()
         return line or None
 
     async def write_json_line(self, line: str) -> None:
-        assert self._process is not None
-        assert self._process.stdin is not None
+        if self._process is None:
+            raise RuntimeError("Transport not started — call start() first")
+        if self._process.stdin is None:
+            raise RuntimeError("stdin pipe is not available")
         self._process.stdin.write(line.encode("utf-8") + b"\n")
         await self._process.stdin.drain()
 
     async def write_bytes(self, data: bytes) -> None:
-        assert self._process is not None
-        assert self._process.stdin is not None
+        if self._process is None:
+            raise RuntimeError("Transport not started — call start() first")
+        if self._process.stdin is None:
+            raise RuntimeError("stdin pipe is not available")
         self._process.stdin.write(data)
         await self._process.stdin.drain()
 

@@ -1,12 +1,16 @@
 """Base adapter — defines the interface all tool adapters must implement."""
 
 from __future__ import annotations
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 from ..events import EventType, RelayEvent
 from ..pty_session import clean_pty_output
 from ..transports import PtyTransport
+
+# Compiled once at import time — used by postprocess_line on every output line.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m|\x1b\[[0-9;]*[A-Za-z]|\r")
 
 
 class AgentRuntime(ABC):
@@ -114,10 +118,7 @@ class BaseAdapter(ABC):
     @classmethod
     def postprocess_line(cls, line: str) -> str:
         """Optional cleanup of raw output lines (strip ANSI, etc.)."""
-        import re
-        # Strip ANSI escape codes
-        ansi = re.compile(r"\x1b\[[0-9;]*m|\x1b\[[0-9;]*[A-Za-z]|\r")
-        return ansi.sub("", line)
+        return _ANSI_RE.sub("", line)
 
     @classmethod
     def create_runtime(

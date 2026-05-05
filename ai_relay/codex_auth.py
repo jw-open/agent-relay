@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-from typing import Optional
+
+from .auth_utils import env_truthy, read_json_file
 
 logger = logging.getLogger(__name__)
 
@@ -15,17 +15,8 @@ def _auth_path(env: dict[str, str]) -> str:
     return os.path.join(home, ".codex", "auth.json")
 
 
-def _env_truthy(value: Optional[str]) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _has_chatgpt_auth(path: str) -> bool:
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return False
-
+    data = read_json_file(path)
     tokens = data.get("tokens") if isinstance(data, dict) else None
     if not isinstance(tokens, dict):
         return False
@@ -40,7 +31,7 @@ def ensure_codex_auth(env: dict[str, str]) -> None:
     accidentally override a user's mounted ChatGPT auth, so strip API-key style
     variables when AI_RELAY_CODEX_PREFER_CHATGPT=1 and auth.json is usable.
     """
-    if not _env_truthy(env.get("AI_RELAY_CODEX_PREFER_CHATGPT")):
+    if not env_truthy(env.get("AI_RELAY_CODEX_PREFER_CHATGPT")):
         return
 
     path = _auth_path(env)

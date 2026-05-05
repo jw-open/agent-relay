@@ -20,6 +20,8 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
+from .auth_utils import env_truthy, read_json_file, write_json_file
+
 logger = logging.getLogger(__name__)
 
 # Sourced from Claude Code 2.1.88 src-extracted/src/constants/oauth.ts
@@ -37,28 +39,8 @@ def _credentials_path(env: dict[str, str]) -> str:
     return os.path.join(home, ".claude", ".credentials.json")
 
 
-def _read_credentials(path: str) -> Optional[dict]:
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _write_credentials(path: str, data: dict) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, path)  # atomic write
-
-
-def _env_truthy(value: Optional[str]) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _prefer_oauth(env: dict[str, str], oauth: dict) -> None:
-    if not oauth.get("accessToken") or not _env_truthy(env.get("AI_RELAY_CLAUDE_PREFER_OAUTH")):
+    if not oauth.get("accessToken") or not env_truthy(env.get("AI_RELAY_CLAUDE_PREFER_OAUTH")):
         return
     for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         if key in env:
@@ -106,24 +88,20 @@ def ensure_claude_token(env: dict[str, str]) -> None:
     Mimics the exact refresh flow used by Claude Code itself.
     No-ops if credentials are not found, have no refresh token, or are still fresh.
     """
-    # Prioritize credentials from env (can be injected by RelaySession from handshake)
     client_id = env.get("CLAUDE_OAUTH_CLIENT_ID") or os.getenv("CLAUDE_OAUTH_CLIENT_ID")
     if not client_id:
         logger.debug("Claude OAuth client ID missing — skipping token refresh.")
         return
 
     path = _credentials_path(env)
-    creds = _read_credentials(path)
+    creds = read_json_file(path)
     if not creds:
         return
 
     oauth = creds.get("claudeAiOauth", {})
     _prefer_oauth(env, oauth)
     refresh_token = oauth.get("refreshToken")
-    if not refresh_token:
-        return
-
-    if not _needs_refresh(creds):
+    if not refresh_token or not _needs_refresh(creds):
         return
 
     logger.info("Claude token expiring soon — refreshing via OAuth")
@@ -139,5 +117,5 @@ def ensure_claude_token(env: dict[str, str]) -> None:
         oauth["scopes"] = result["scope"].split()
 
     creds["claudeAiOauth"] = oauth
-    _write_credentials(path, creds)
+    write_json_file(path, creds)
     logger.info("Claude token refreshed")
