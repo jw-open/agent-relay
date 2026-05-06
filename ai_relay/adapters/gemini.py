@@ -121,10 +121,8 @@ class GeminiStructuredRuntime(AgentRuntime):
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "result": {
-                        "outcome": {
-                            "outcome": "selected",
-                            "optionId": option_id,
-                        }
+                        "outcome": "selected",
+                        "optionId": option_id,
                     }
                 }
                 logger.info("[%s] permission_response → id=%r optionId=%r", self.session_id, request_id, option_id)
