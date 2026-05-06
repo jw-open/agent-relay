@@ -82,7 +82,7 @@ class GeminiStructuredRuntime(AgentRuntime):
             return
         if msg_type == "permission_response":
             request_id = msg.get("request_id")
-            if request_id:
+            if request_id is not None:
                 behavior = msg.get("behavior", "allow")
                 # Client may send optionId directly; otherwise pick from the options list
                 # that was echoed back in updatedInput/args.
@@ -127,7 +127,7 @@ class GeminiStructuredRuntime(AgentRuntime):
                         }
                     }
                 }
-                logger.debug("[%s] permission_response → optionId=%r", self.session_id, option_id)
+                logger.info("[%s] permission_response → id=%r optionId=%r", self.session_id, request_id, option_id)
                 await self.transport.write_json_line(json.dumps(payload))
             return
 
@@ -306,6 +306,10 @@ class GeminiStructuredRuntime(AgentRuntime):
                             await self._event_queue.put(event)
                     elif method == "session/request_permission":
                         tool_call = params.get("toolCall", {}) if isinstance(params, dict) else {}
+                        logger.info("[%s] session/request_permission id=%r tool=%r options=%r",
+                                    self.session_id, msg.get("id"),
+                                    tool_call.get("title") or tool_call.get("toolCallId"),
+                                    params.get("options") if isinstance(params, dict) else None)
                         await self._event_queue.put(RelayEvent(
                             type=EventType.PERMISSION_REQUEST,
                             session_id=self.session_id,
