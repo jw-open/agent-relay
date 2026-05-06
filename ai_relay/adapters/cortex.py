@@ -1,9 +1,29 @@
-"""Snowflake Cortex API adapter."""
+"""Snowflake Cortex API adapter.
+
+Supports three Cortex modes:
+  - agent   : Cortex Agents REST API  (/api/v2/cortex/agent:run)    [default]
+  - chat    : Cortex Inference         (/api/v2/cortex/v1/chat/completions)
+  - analyst : Cortex Analyst           (/api/v2/cortex/analyst/message)
+
+Authentication:
+  PAT  : Bearer token + X-Snowflake-Authorization-Token-Type: PROGRAMMATIC_ACCESS_TOKEN
+  JWT  : Bearer token (no special header — use token_type="JWT" in config)
+
+Config keys (all under handshake["snowflake"] dict or top-level handshake):
+  account_url    : https://<account>.snowflakecomputing.com
+  token          : PAT or JWT string
+  token_type     : "PROGRAMMATIC_ACCESS_TOKEN" (default for PAT) | "KEYPAIR_JWT" | none
+  model          : Snowflake model name (default: claude-3-5-sonnet)
+  mode           : agent | chat | analyst  (default: agent)
+  tools          : list of tool specs for agent mode (optional)
+  semantic_model_file / semantic_model / semantic_view : required for analyst mode
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import urllib.error
 import urllib.request
@@ -11,6 +31,8 @@ from typing import Any, Optional
 
 from ..events import EventType, RelayEvent
 from .base import AgentRuntime, BaseAdapter
+
+logger = logging.getLogger(__name__)
 
 
 class CortexRuntime(AgentRuntime):
@@ -26,11 +48,14 @@ class CortexRuntime(AgentRuntime):
         self.model = model
         self.config = config
         self.snowflake = config.get("snowflake") if isinstance(config.get("snowflake"), dict) else {}
-        self.mode = str(config.get("mode") or self.snowflake.get("mode") or "chat")
+        self.mode = str(config.get("mode") or self.snowflake.get("mode") or "agent")
         self._events: asyncio.Queue[Optional[RelayEvent]] = asyncio.Queue()
         self._tasks: set[asyncio.Task[None]] = set()
         self._history: list[dict[str, Any]] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Accumulate assistant text across streamed deltas (for history)
+        self._current_assistant_text: str = ""
+        self._current_assistant_thinking: str = ""
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -72,7 +97,17 @@ class CortexRuntime(AgentRuntime):
 
     async def _run_request(self, text: str) -> None:
         try:
-            await asyncio.to_thread(self._request_sync, text)
+            # Append user message to history before streaming
+            user_msg: dict[str, Any]
+            if self.mode in ("agent", "analyst"):
+                user_msg = {"role": "user", "content": [{"type": "text", "text": text}]}
+            else:
+                user_msg = {"role": "user", "content": text}
+            self._history.append(user_msg)
+            self._current_assistant_text = ""
+            self._current_assistant_thinking = ""
+
+            await asyncio.to_thread(self._request_sync)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -82,28 +117,32 @@ class CortexRuntime(AgentRuntime):
                 text=str(exc),
             ))
 
-    def _request_sync(self, text: str) -> None:
+    def _request_sync(self) -> None:
         url = self._endpoint()
-        body = self._request_body(text)
+        body = self._request_body()
         data = json.dumps(body).encode("utf-8")
+        headers = self._headers()
+        logger.info("[%s] Cortex %s → %s model=%s", self.session_id, self.mode, url,
+                    body.get("model", "?"))
         req = urllib.request.Request(
             url,
             data=data,
             method="POST",
-            headers=self._headers(),
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(req, timeout=float(self._setting("timeout", 300))) as response:
                 self._consume_sse(response)
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
+            body_text = exc.read().decode("utf-8", errors="replace")
             self._put(RelayEvent(
                 type=EventType.ERROR,
                 session_id=self.session_id,
-                text=f"Snowflake Cortex HTTP {exc.code}: {body}",
+                text=f"Snowflake Cortex HTTP {exc.code}: {body_text}",
             ))
 
     def _consume_sse(self, response: Any) -> None:
+        """Parse SSE stream and dispatch events. Handles both event: / data: and bare data: formats."""
         event_name = "message"
         data_lines: list[str] = []
         for raw in response:
@@ -119,7 +158,15 @@ class CortexRuntime(AgentRuntime):
                 event_name = line.split(":", 1)[1].strip()
             elif line.startswith("data:"):
                 data_lines.append(line.split(":", 1)[1].strip())
+        # Flush any trailing event
         self._flush_sse_event(event_name, data_lines)
+        # Append completed assistant message to history
+        if self._current_assistant_text:
+            self._history.append({
+                "role": "assistant",
+                "content": [{"type": "text", "text": self._current_assistant_text}],
+            })
+            self._current_assistant_text = ""
 
     def _flush_sse_event(self, event_name: str, data_lines: list[str]) -> None:
         if not data_lines:
@@ -142,7 +189,213 @@ class CortexRuntime(AgentRuntime):
     def _events_from_sse(self, event_name: str, payload: dict[str, Any]) -> list[RelayEvent]:
         if self.mode == "analyst":
             return self._analyst_events(event_name, payload)
+        if self.mode == "agent":
+            return self._agent_events(event_name, payload)
         return self._chat_events(event_name, payload)
+
+    # ── Agent mode (Cortex Agents REST API) ──────────────────────────────────
+
+    def _agent_events(self, event_name: str, payload: dict[str, Any]) -> list[RelayEvent]:
+        """Parse Cortex Agents API SSE events.
+
+        Event types emitted by /api/v2/cortex/agent:run:
+          response.text.delta        — streaming text chunk
+          response.thinking.delta    — extended thinking / reasoning chunk
+          response.tool_use          — agent invoking a tool (server-side)
+          response.tool_result       — result of a server-side tool call
+          response.status            — status updates (queued, running, done, error)
+          response                   — final complete message (non-streaming)
+          error                      — API error
+          message.start / message.stop — message lifecycle markers
+          content.block.start / .stop  — content block lifecycle
+        """
+        ev_type = payload.get("type") or event_name
+
+        # ── Text streaming ──────────────────────────────────────────────────
+        if ev_type == "response.text.delta":
+            delta = payload.get("delta") or payload.get("text") or ""
+            self._current_assistant_text += delta
+            return [RelayEvent(
+                type=EventType.RESPONSE,
+                session_id=self.session_id,
+                text=delta,
+                raw=payload,
+            )]
+
+        # ── Thinking / reasoning ────────────────────────────────────────────
+        if ev_type == "response.thinking.delta":
+            delta = payload.get("delta") or payload.get("thinking") or ""
+            self._current_assistant_thinking += delta
+            return [RelayEvent(
+                type=EventType.REASONING,
+                session_id=self.session_id,
+                text=delta,
+                raw=payload,
+            )]
+
+        # ── Tool calls (server-side; info-only, no client-side approval needed) ─
+        if ev_type == "response.tool_use":
+            tool_info = payload.get("tool_use") or {}
+            tool_name = tool_info.get("name") or tool_info.get("type") or "tool"
+            tool_input = tool_info.get("input") or {}
+            tool_id = tool_info.get("id") or ""
+            logger.info("[%s] Cortex tool_use name=%s id=%s", self.session_id, tool_name, tool_id)
+            return [RelayEvent(
+                type=EventType.TOOL_CALL,
+                session_id=self.session_id,
+                tool=tool_name,
+                tool_use_id=tool_id,
+                args=tool_input,
+                text=self._format_tool_call(tool_name, tool_input),
+                raw=payload,
+            )]
+
+        # ── Tool results ────────────────────────────────────────────────────
+        if ev_type == "response.tool_result":
+            result_info = payload.get("tool_result") or {}
+            tool_id = result_info.get("tool_use_id") or ""
+            content = result_info.get("content") or []
+            result_text = self._extract_tool_result_text(content)
+            return [RelayEvent(
+                type=EventType.TOOL_RESULT,
+                session_id=self.session_id,
+                tool_use_id=tool_id,
+                text=result_text,
+                raw=payload,
+            )]
+
+        # ── Status events ────────────────────────────────────────────────────
+        if ev_type == "response.status":
+            status = payload.get("status") or event_name
+            return [RelayEvent(
+                type=EventType.STATUS,
+                session_id=self.session_id,
+                status=str(status),
+                raw=payload,
+            )]
+
+        # ── Final complete response (non-streaming or summary) ───────────────
+        if ev_type == "response":
+            output = payload.get("output") or []
+            events: list[RelayEvent] = []
+            for block in output:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    text = block.get("text") or ""
+                    if text:
+                        events.append(RelayEvent(
+                            type=EventType.RESPONSE,
+                            session_id=self.session_id,
+                            text=text,
+                            raw=block,
+                        ))
+                elif btype == "tool_use":
+                    tool_name = block.get("name") or "tool"
+                    tool_input = block.get("input") or {}
+                    events.append(RelayEvent(
+                        type=EventType.TOOL_CALL,
+                        session_id=self.session_id,
+                        tool=tool_name,
+                        args=tool_input,
+                        text=self._format_tool_call(tool_name, tool_input),
+                        raw=block,
+                    ))
+            stop_reason = payload.get("stop_reason")
+            if stop_reason:
+                events.append(RelayEvent(
+                    type=EventType.STATUS,
+                    session_id=self.session_id,
+                    status=str(stop_reason),
+                    raw=payload,
+                ))
+            return events
+
+        # ── Error ─────────────────────────────────────────────────────────────
+        if ev_type == "error" or "error" in payload:
+            err = payload.get("error") or payload
+            msg = err.get("message") or err.get("detail") or json.dumps(err) if isinstance(err, dict) else str(err)
+            return [RelayEvent(
+                type=EventType.ERROR,
+                session_id=self.session_id,
+                text=msg,
+                raw=payload,
+            )]
+
+        # ── Anthropic-style content block delta (model may emit this format too) ─
+        if ev_type == "content.block.delta":
+            delta = payload.get("delta") or {}
+            dtype = delta.get("type")
+            if dtype == "text_delta":
+                text = delta.get("text") or ""
+                self._current_assistant_text += text
+                return [RelayEvent(
+                    type=EventType.RESPONSE,
+                    session_id=self.session_id,
+                    text=text,
+                    raw=payload,
+                )]
+            if dtype == "thinking_delta":
+                thinking = delta.get("thinking") or ""
+                return [RelayEvent(
+                    type=EventType.REASONING,
+                    session_id=self.session_id,
+                    text=thinking,
+                    raw=payload,
+                )]
+
+        # ── SQL / chart / table special outputs ──────────────────────────────
+        if ev_type in ("response.sql", "response.chart", "response.table"):
+            label = ev_type.split(".")[-1].upper()
+            content = payload.get("sql") or payload.get("data") or json.dumps(payload)
+            return [RelayEvent(
+                type=EventType.TOOL_RESULT,
+                session_id=self.session_id,
+                tool=label.lower(),
+                text=f"[{label}]\n{content}",
+                raw=payload,
+            )]
+
+        # ── Lifecycle markers (no-op) ─────────────────────────────────────────
+        if ev_type in ("message.start", "message.stop", "content.block.start", "content.block.stop",
+                       "message.delta", "ping"):
+            return []
+
+        # ── Unknown — pass through as stream_event ────────────────────────────
+        return [RelayEvent(
+            type=EventType.STREAM_EVENT,
+            session_id=self.session_id,
+            metadata={"event": ev_type},
+            raw=payload,
+        )]
+
+    @staticmethod
+    def _format_tool_call(name: str, inputs: dict[str, Any]) -> str:
+        """Format a tool call for display (Claude Code style)."""
+        if not inputs:
+            return name
+        try:
+            args_str = json.dumps(inputs, indent=2, ensure_ascii=False)
+        except Exception:
+            args_str = str(inputs)
+        return f"{name}\n{args_str}"
+
+    @staticmethod
+    def _extract_tool_result_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    parts.append(item.get("text") or item.get("value") or json.dumps(item))
+                else:
+                    parts.append(str(item))
+            return "\n".join(parts)
+        return str(content or "")
+
+    # ── Analyst mode ─────────────────────────────────────────────────────────
 
     def _analyst_events(self, event_name: str, payload: dict[str, Any]) -> list[RelayEvent]:
         if event_name == "status":
@@ -194,7 +447,10 @@ class CortexRuntime(AgentRuntime):
             )]
         if event_name == "done":
             return [RelayEvent(type=EventType.STATUS, session_id=self.session_id, status="done", raw=payload)]
-        return [RelayEvent(type=EventType.STREAM_EVENT, session_id=self.session_id, metadata={"event": event_name}, raw=payload)]
+        return [RelayEvent(type=EventType.STREAM_EVENT, session_id=self.session_id,
+                           metadata={"event": event_name}, raw=payload)]
+
+    # ── Chat mode (OpenAI-compatible) ─────────────────────────────────────────
 
     def _chat_events(self, event_name: str, payload: dict[str, Any]) -> list[RelayEvent]:
         if "error" in payload:
@@ -209,6 +465,7 @@ class CortexRuntime(AgentRuntime):
             delta = choices[0].get("delta") or {}
             content = delta.get("content")
             if content:
+                self._current_assistant_text += content
                 return [RelayEvent(
                     type=EventType.RESPONSE,
                     session_id=self.session_id,
@@ -223,14 +480,22 @@ class CortexRuntime(AgentRuntime):
                     status=str(finish_reason),
                     raw=payload,
                 )]
-        return [RelayEvent(type=EventType.STREAM_EVENT, session_id=self.session_id, metadata={"event": event_name}, raw=payload)]
+        return [RelayEvent(type=EventType.STREAM_EVENT, session_id=self.session_id,
+                           metadata={"event": event_name}, raw=payload)]
+
+    # ── Endpoint / headers / body ─────────────────────────────────────────────
 
     def _endpoint(self) -> str:
         account_url = str(self._setting("account_url", "")).rstrip("/")
         if not account_url:
-            raise ValueError("Snowflake Cortex requires snowflake.account_url.")
+            raise ValueError(
+                "Snowflake Cortex requires snowflake.account_url "
+                "(e.g. https://<account>.snowflakecomputing.com)"
+            )
         if self.mode == "analyst":
             return f"{account_url}/api/v2/cortex/analyst/message"
+        if self.mode == "agent":
+            return f"{account_url}/api/v2/cortex/agent:run"
         return f"{account_url}/api/v2/cortex/v1/chat/completions"
 
     def _headers(self) -> dict[str, str]:
@@ -239,24 +504,27 @@ class CortexRuntime(AgentRuntime):
         if not token and token_env:
             token = os.environ.get(str(token_env))
         if not token:
-            raise ValueError("Snowflake Cortex requires snowflake.token or snowflake.token_env.")
-        headers = {
+            raise ValueError(
+                "Snowflake Cortex requires a token (PAT). "
+                "Set snowflake.token in config or SNOWFLAKE_PAT env var."
+            )
+        headers: dict[str, str] = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "text/event-stream, application/json",
         }
-        token_type = self._setting("token_type")
+        # Default to PAT token type unless explicitly overridden
+        token_type = self._setting("token_type", "PROGRAMMATIC_ACCESS_TOKEN")
         if token_type:
             headers["X-Snowflake-Authorization-Token-Type"] = str(token_type)
         return headers
 
-    def _request_body(self, text: str) -> dict[str, Any]:
+    def _request_body(self) -> dict[str, Any]:
+        model = self.model or str(self._setting("model", "claude-3-5-sonnet"))
+
         if self.mode == "analyst":
             body: dict[str, Any] = {
-                "messages": self._history + [{
-                    "role": "user",
-                    "content": [{"type": "text", "text": text}],
-                }],
+                "messages": self._history,
                 "stream": True,
             }
             for key in ("semantic_model_file", "semantic_model", "semantic_models", "semantic_view"):
@@ -265,13 +533,41 @@ class CortexRuntime(AgentRuntime):
                     body[key] = value
             if not any(k in body for k in ("semantic_model_file", "semantic_model", "semantic_models", "semantic_view")):
                 raise ValueError(
-                    "Cortex Analyst requires one of snowflake.semantic_model_file, semantic_model, semantic_models, or semantic_view."
+                    "Cortex Analyst requires one of: snowflake.semantic_model_file, "
+                    "semantic_model, semantic_models, or semantic_view."
                 )
             return body
 
-        messages = self._history + [{"role": "user", "content": text}]
+        if self.mode == "agent":
+            # Cortex Agents REST API body
+            tools = self._setting("tools") or []
+            body = {
+                "model": model,
+                "messages": self._history,
+                "stream": True,
+            }
+            if tools:
+                body["tools"] = tools
+            # Optional response format
+            response_format = self._setting("response_format")
+            if response_format:
+                body["response_format"] = response_format
+            return body
+
+        # chat mode (OpenAI-compatible)
+        messages: list[dict[str, Any]] = []
+        for msg in self._history:
+            if isinstance(msg.get("content"), list):
+                # Convert agent-style content to flat string for chat mode
+                text_parts = [
+                    b.get("text", "") for b in msg["content"]
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ]
+                messages.append({"role": msg["role"], "content": " ".join(text_parts)})
+            else:
+                messages.append(msg)
         return {
-            "model": self.model or self._setting("model", "claude-sonnet-4-5"),
+            "model": model,
             "messages": messages,
             "stream": True,
         }
