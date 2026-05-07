@@ -197,4 +197,4 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License
 
-MIT
+Apache-2.0
