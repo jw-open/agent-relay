@@ -109,11 +109,32 @@ Codex uses `codex app-server --listen stdio://` and keeps a persistent thread be
 {"tool": "codex", "folder": "/path/to/project", "model": "gpt-5.2"}
 ```
 
-Gemini CLI uses headless `stream-json` mode. Each text message starts one Gemini turn:
+Gemini CLI uses ACP (Agent Communication Protocol) mode. Each text message starts one Gemini turn:
 
 ```json
 {"tool": "gemini", "folder": "/path/to/project", "model": "gemini-2.5-flash"}
 ```
+
+> **Gemini-specific behavior — per-turn process lifecycle**
+>
+> Unlike Claude Code (persistent process + `--resume`) and Codex (persistent
+> app-server), Gemini CLI ACP mode (≥ 0.40.x) exits the subprocess after every
+> `session/prompt` turn completes (exit code 0). This is by design in the Gemini
+> CLI implementation.
+>
+> The relay handles this transparently:
+> - On the first turn the relay calls `session/new` and saves the returned
+>   `sessionId` to `.gemini_acp_session` in the session working folder.
+> - On each subsequent reconnect the relay calls `session/load` with that ID so
+>   Gemini restores conversation context in the new process.
+> - If `session/load` fails (session expired or folder was wiped) the relay
+>   falls back to `session/new` automatically.
+>
+> **Implication for permission approvals:** because the process exits after each
+> turn, permission responses must be sent while the current turn's process is
+> still alive (i.e. before the `session/prompt` RPC completes). The default
+> `session/prompt` timeout is 5 minutes, which covers typical interactive
+> permission dialogs.
 
 Snowflake Cortex uses API configuration in the handshake.
 

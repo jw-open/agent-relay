@@ -4,6 +4,43 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.24] — 2026-05-07
+
+### Fixed
+- `pyproject.toml`, `README.md`: corrected license classifier from MIT to Apache-2.0.
+
+---
+
+## [0.4.23] — 2026-05-07
+
+### Fixed
+- `gemini.py`: Gemini CLI ACP mode exits the subprocess after every `session/prompt`
+  turn (exit code 0). Previously the relay always called `session/new` on reconnect,
+  silently losing conversation history between turns. Now the relay saves the ACP
+  `sessionId` to `.gemini_acp_session` inside the session working folder and calls
+  `session/load` on the next connection, restoring context. Falls back to `session/new`
+  if the session cannot be loaded (e.g. expired or first turn).
+
+  **Why Gemini exits per-turn:** Gemini CLI's ACP implementation (≥ 0.40.x) is
+  designed to exit after each `session/prompt` completes rather than remaining as
+  a persistent server. This differs from Claude Code (which uses `--resume` to
+  reload a persistent session) and Codex (which uses a persistent app-server).
+  The `session/load` call is the ACP-standard mechanism for resuming a prior
+  session in a fresh process.
+
+---
+
+## [0.4.22] — 2026-05-06
+
+### Added
+- Snowflake Cortex `agent` mode via `/api/v2/cortex/agent:run` SSE endpoint.
+  Full event parsing: text deltas → `RESPONSE`, thinking deltas → `REASONING`,
+  tool calls → `TOOL_CALL`, tool results → `TOOL_RESULT`, status → `STATUS`.
+  PAT auth (`X-Snowflake-Authorization-Token-Type: PROGRAMMATIC_ACCESS_TOKEN`).
+  Multi-turn conversation history tracking. `chat` and `analyst` modes unchanged.
+
+---
+
 ## [0.4.17] — 2026-05-04
 
 ### Fixed
