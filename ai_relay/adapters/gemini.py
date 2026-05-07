@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
 from typing import Any, Optional
 
@@ -47,7 +48,7 @@ class GeminiStructuredRuntime(AgentRuntime):
         await self.transport.start()
         self._reader_task = asyncio.create_task(self._read_stdout())
         self._stderr_task = asyncio.create_task(self._read_stderr())
-        
+
         await self._request("initialize", {
             "protocolVersion": 1,
             "clientInfo": {"name": "ai-relay", "version": "0"},
@@ -58,13 +59,28 @@ class GeminiStructuredRuntime(AgentRuntime):
             },
         })
         self._initialized = True
-        
-        res = await self._request("session/new", {
-            "cwd": self.cwd,
-            "mcpServers": [],
-        })
-        result = self._result_or_raise(res, "session/new")
-        self._acp_session_id = result.get("sessionId")
+
+        # Try to resume a prior ACP session so conversation history is preserved
+        # across Gemini CLI process restarts (Gemini ACP exits after each turn).
+        saved_session_id = self._load_acp_session_id()
+        if saved_session_id:
+            try:
+                res = await self._request("session/load", {"sessionId": saved_session_id})
+                result = self._result_or_raise(res, "session/load")
+                self._acp_session_id = result.get("sessionId") or saved_session_id
+                logger.info("[%s] Resumed Gemini ACP session %s", self.session_id, self._acp_session_id)
+            except Exception:
+                logger.info("[%s] Could not load Gemini session %s — starting new", self.session_id, saved_session_id)
+                saved_session_id = None
+
+        if not saved_session_id:
+            res = await self._request("session/new", {
+                "cwd": self.cwd,
+                "mcpServers": [],
+            })
+            result = self._result_or_raise(res, "session/new")
+            self._acp_session_id = result.get("sessionId")
+            self._save_acp_session_id(self._acp_session_id)
 
     async def read_event(self) -> Optional[RelayEvent]:
         return await self._event_queue.get()
@@ -244,6 +260,25 @@ class GeminiStructuredRuntime(AgentRuntime):
         except asyncio.TimeoutError as exc:
             self._pending_requests.pop(req_id, None)
             raise RuntimeError(f"Timed out waiting for Gemini ACP {method}") from exc
+
+    def _acp_session_file(self) -> str:
+        return os.path.join(self.cwd, ".gemini_acp_session")
+
+    def _load_acp_session_id(self) -> Optional[str]:
+        try:
+            with open(self._acp_session_file(), "r") as f:
+                return f.read().strip() or None
+        except OSError:
+            return None
+
+    def _save_acp_session_id(self, session_id: Optional[str]) -> None:
+        if not session_id:
+            return
+        try:
+            with open(self._acp_session_file(), "w") as f:
+                f.write(session_id)
+        except OSError as exc:
+            logger.debug("[%s] Could not save Gemini ACP session ID: %s", self.session_id, exc)
 
     @staticmethod
     def _result_or_raise(response: Any, method: str) -> dict[str, Any]:
