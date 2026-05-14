@@ -51,7 +51,9 @@ class CortexRuntime(AgentRuntime):
         self.mode = str(config.get("mode") or self.snowflake.get("mode") or "agent")
         self._events: asyncio.Queue[Optional[RelayEvent]] = asyncio.Queue()
         self._tasks: set[asyncio.Task[None]] = set()
-        self._history: list[dict[str, Any]] = []
+        # Restore history from handshake config (persisted across reconnects)
+        saved_history = config.get("cortex_history")
+        self._history: list[dict[str, Any]] = list(saved_history) if isinstance(saved_history, list) else []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         # Accumulate assistant text across streamed deltas (for history)
         self._current_assistant_text: str = ""
@@ -167,6 +169,15 @@ class CortexRuntime(AgentRuntime):
                 "content": [{"type": "text", "text": self._current_assistant_text}],
             })
             self._current_assistant_text = ""
+            # Emit history snapshot so routes.py can persist it to MongoDB.
+            # Limit to last 40 messages (20 turns) to avoid unbounded growth.
+            history_snapshot = self._history[-40:]
+            self._put(RelayEvent(
+                type=EventType.STATUS,
+                session_id=self.session_id,
+                status="cortex_history_snapshot",
+                metadata={"cortex_history": history_snapshot},
+            ))
 
     def _flush_sse_event(self, event_name: str, data_lines: list[str]) -> None:
         if not data_lines:

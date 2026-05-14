@@ -38,6 +38,8 @@ class CodexAppServerRuntime(AgentRuntime):
         self._turn_id: Optional[str] = None
         self._approval_policy = self.config.get("approvalPolicy") or self.config.get("approval_policy")
         self._sandbox = self.config.get("sandbox")
+        # Persisted thread_id for resume across reconnects (supplied via handshake config)
+        self._resume_thread_id: Optional[str] = self.config.get("codex_thread_id") or None
 
     async def start(self) -> None:
         from ..codex_auth import ensure_codex_auth
@@ -103,6 +105,39 @@ class CodexAppServerRuntime(AgentRuntime):
         await self._send_notification("initialized")
 
     async def _start_thread(self) -> None:
+        if self._resume_thread_id:
+            # Resume an existing thread by ID
+            import logging
+            logging.getLogger(__name__).info(
+                "[%s] Resuming Codex thread %s", self.session_id, self._resume_thread_id
+            )
+            resume_params: dict[str, Any] = {
+                "threadId": self._resume_thread_id,
+                "excludeTurns": True,  # don't load full turn history — saves bandwidth
+            }
+            if self.model:
+                resume_params["model"] = self.model
+            if self._approval_policy:
+                resume_params["approvalPolicy"] = self._approval_policy
+            if self._sandbox:
+                resume_params["sandbox"] = self._sandbox
+            try:
+                result = await self._send_request("thread/resume", resume_params)
+                thread = result.get("thread") if isinstance(result, dict) else None
+                self._thread_id = self._extract_id(thread) or self._resume_thread_id
+                await self._queue.put(RelayEvent(
+                    type=EventType.STATUS,
+                    session_id=self.session_id,
+                    status="thread_started",
+                    metadata={"thread_id": self._thread_id, "resumed": True},
+                ))
+                return
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "[%s] thread/resume failed (%s) — falling back to thread/start", self.session_id, exc
+                )
+                # Fall through to thread/start below
+
         params: dict[str, Any] = {
             "cwd": self.cwd,
             "ephemeral": self.config.get("ephemeral", True),
