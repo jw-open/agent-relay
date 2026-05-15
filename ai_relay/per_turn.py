@@ -60,8 +60,15 @@ class PerTurnRuntime(AgentRuntime):
         self._events: asyncio.Queue[Optional[RelayEvent]] = asyncio.Queue()
         self._current: Optional[AgentRuntime] = None
         self._reader_task: Optional[asyncio.Task] = None
-        # Claude-specific: internal session_id for --resume
-        self._agent_session_id: Optional[str] = None
+        # Claude-specific: internal session_id for --resume.
+        # Seeded from handshake config["claude_session_id"] so the conversation
+        # is resumed even after a container restart.
+        self._agent_session_id: Optional[str] = (config or {}).get("claude_session_id") or None
+        if self._agent_session_id:
+            logger.info(
+                "[per-turn:%s] seeding resume from handshake claude_session_id=%s",
+                session_id, self._agent_session_id,
+            )
         self._turn_lock = asyncio.Lock()
         self._stopped = False
 
